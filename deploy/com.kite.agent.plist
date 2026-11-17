@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kite.agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-lc</string>
+        <string>set -a; . "$HOME/.config/kite/agent.env"; set +a; exec /usr/local/bin/kite-agent</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>Comment</key>
+    <string>kite-agent. Copy deploy/agent.env.example to ~/.config/kite/agent.env and put the real REGISTRATION_KEY there. Do not commit that file. This plist has no secrets.</string>
+</dict>
+</plist>

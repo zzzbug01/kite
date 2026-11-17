@@ -1,0 +1,102 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and package
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          if ! command -v zip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y zip
+          fi
+          ext=""
+          if [ "${GOOS}" = "windows" ]; then
+            ext=".exe"
+          fi
+          stage="$(mktemp -d)"
+          version="${GITHUB_REF_NAME}"
+          for cmd in kite kite-agent kite-relay; do
+            go build -trimpath \
+              -ldflags "-s -w -X github.com/zzzbug01/kite/internal/version.Version=${version}" \
+              -o "${stage}/${cmd}${ext}" "./cmd/${cmd}"
+          done
+          mkdir -p dist
+          archive="kite_${version}_${GOOS}_${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            (
+              cd "${stage}"
+              zip -r "${GITHUB_WORKSPACE}/dist/${archive}.zip" \
+                "kite.exe" "kite-agent.exe" "kite-relay.exe"
+            )
+          else
+            tar -C "${stage}" -czf "dist/${archive}.tar.gz" kite kite-agent kite-relay
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kite-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: kite-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd artifacts
+          sha256sum -- * > SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" artifacts/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "$(printf 'kite %s\n\nStatic binaries built with CGO_ENABLED=0 for linux, windows, and macOS.\nSee the README for relay, agent, and SSH ProxyCommand setup.\n' "${GITHUB_REF_NAME}")" \
+            --verify-tag

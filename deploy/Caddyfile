@@ -1,0 +1,18 @@
+# kite relay behind Caddy.
+#
+# Replace tunnel.example.com. Caddy can obtain a certificate for that name;
+# do not commit the certificate or private key.
+# kite-relay listens on 127.0.0.1:8080 (plain WebSocket).
+# flush_interval -1 disables response buffering so SSH bytes are not delayed.
+# The application heartbeat (ping every 20s) keeps the tunnel alive across
+# these long timeouts.
+
+tunnel.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 24h
+			write_timeout 24h
+		}
+	}
+}

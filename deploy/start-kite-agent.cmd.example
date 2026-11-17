@@ -1,0 +1,9 @@
+@echo off
+REM Example wrapper. The install script writes a real copy to the install
+REM directory (outside this repo). Replace CHANGE_ME locally. Never commit it.
+setlocal
+set "RELAY_ADDR=wss://tunnel.example.com/agent"
+set "REGISTRATION_KEY=CHANGE_ME"
+set "AGENT_NAME=my-pc"
+set "LOCAL_SSH_ADDR=127.0.0.1:22"
+"C:\Program Files\kite\kite-agent.exe"

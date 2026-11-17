@@ -1,0 +1,16 @@
+[Unit]
+Description=kite relay (SSH over WebSocket)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kite-relay
+EnvironmentFile=/etc/kite/relay.env
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=kite agent (dial-out SSH tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kite-agent
+EnvironmentFile=/etc/kite/agent.env
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
