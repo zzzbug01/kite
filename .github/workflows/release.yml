@@ -93,10 +93,17 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # Tags such as v0.1.0-rc.1 are prereleases. v0.1.0 is not.
+          PRERELEASE: ${{ contains(github.ref_name, '-') }}
         run: |
           set -euo pipefail
+          extra=()
+          if [ "${PRERELEASE}" = "true" ]; then
+            extra+=(--prerelease)
+          fi
           gh release create "${GITHUB_REF_NAME}" artifacts/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --notes "$(printf 'kite %s\n\nStatic binaries built with CGO_ENABLED=0 for linux, windows, and macOS.\nSee the README for relay, agent, and SSH ProxyCommand setup.\n' "${GITHUB_REF_NAME}")" \
-            --verify-tag
+            --verify-tag \
+            "${extra[@]}"
