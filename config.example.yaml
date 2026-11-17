@@ -1,0 +1,30 @@
+# Example kite configuration.
+#
+# Copy to a gitignored file and edit it there. Do not commit real values.
+# Preferred locations:
+#   ~/.config/kite/config.yaml
+#   or any path passed with --config / KITE_CONFIG
+#
+# Environment variables override this file. Command-line flags override both.
+# REGISTRATION_KEY and RELAY_ADDR should be set that way. The placeholder
+# CHANGE_ME is rejected at startup.
+
+relay:
+  listen_addr: "127.0.0.1:8080"
+  registration_key: "CHANGE_ME"
+  # Leave both unset to serve plain WebSocket for nginx or Caddy.
+  # tls_cert_file: ""
+  # tls_key_file: ""
+  idle_timeout: "90s"
+
+agent:
+  relay_addr: "wss://tunnel.example.com/agent"
+  registration_key: "CHANGE_ME"
+  name: "my-pc"
+  local_ssh_addr: "127.0.0.1:22"
+  idle_timeout: "90s"
+
+client:
+  relay_addr: "wss://tunnel.example.com/client"
+  registration_key: "CHANGE_ME"
+  idle_timeout: "90s"

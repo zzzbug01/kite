@@ -1,0 +1,30 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+*.out
+
+# Local secrets. Example files (config.example.yaml, deploy/*.example) are tracked.
+# Set REGISTRATION_KEY and RELAY_ADDR in the environment or in one of these
+# gitignored files. Never commit real values.
+.env
+.env.*
+!.env.example
+*.env
+!*.env.example
+*.pem
+*.key
+*.crt
+*.p12
+config.yaml
+config.yml
+config.toml
+config.json
+start-kite-agent.cmd
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
