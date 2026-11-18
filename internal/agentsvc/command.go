@@ -304,6 +304,24 @@ func FormatList(rows []ListedService) string {
 	return b.String()
 }
 
+// instanceCommand is the control command for one service. A non-default
+// instance always includes --service-name so the hint does not act on kite-agent.
+func instanceCommand(verb, name string) string {
+	if name == "" || name == ServiceName {
+		return "kite-agent " + verb
+	}
+	return "kite-agent " + verb + " --service-name " + name
+}
+
+// FormatLegacyLogonTask is the extra list line for the old logon task.
+func FormatLegacyLogonTask(status string) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return ""
+	}
+	return "legacy logon task " + ServiceName + ": " + status + "\n"
+}
+
 func listField(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -484,11 +502,7 @@ func FormatStatus(s StatusInfo) string {
 	fmt.Fprintf(&b, "Service: %s\n", name)
 	if !s.Installed {
 		fmt.Fprintf(&b, "Installed: no\n")
-		if name == ServiceName {
-			fmt.Fprintf(&b, "Install it from an elevated prompt: kite-agent install\n")
-		} else {
-			fmt.Fprintf(&b, "Install it from an elevated prompt: kite-agent install --service-name %s\n", name)
-		}
+		fmt.Fprintf(&b, "Install it from an elevated prompt: %s\n", instanceCommand("install", name))
 		return b.String()
 	}
 	fmt.Fprintf(&b, "Installed: yes\n")
@@ -520,7 +534,7 @@ func FormatStatus(s StatusInfo) string {
 	case "running":
 		fmt.Fprintf(&b, "The service is running in the background with no console window.\n")
 	case "stopped":
-		fmt.Fprintf(&b, "Start it from an elevated prompt: kite-agent start\n")
+		fmt.Fprintf(&b, "Start it from an elevated prompt: %s\n", instanceCommand("start", name))
 	}
 	return b.String()
 }

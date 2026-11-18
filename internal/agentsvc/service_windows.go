@@ -224,7 +224,7 @@ func Install(opt Options) error {
 		created, err := m.CreateService(name, dest, serviceConfig(name), args...)
 		if err != nil {
 			if errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
-				return fmt.Errorf("service %s is marked for deletion; wait a moment and run kite-agent install again", name)
+				return fmt.Errorf("service %s is marked for deletion; wait a moment and run %s again", name, instanceCommand("install", name))
 			}
 			return fmt.Errorf("create service: %w", err)
 		}
@@ -415,7 +415,7 @@ func withMutatingService(name string, fn func(*mgr.Service) error) error {
 	s, err := openService(m, name, access)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-			return fmt.Errorf("service %s is not installed; run kite-agent install --service-name %s from an elevated prompt", name, name)
+			return fmt.Errorf("service %s is not installed; run %s from an elevated prompt", name, instanceCommand("install", name))
 		}
 		return fmt.Errorf("open service: %w", err)
 	}

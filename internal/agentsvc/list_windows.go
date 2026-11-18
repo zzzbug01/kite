@@ -3,6 +3,12 @@
 package agentsvc
 
 import (
+	"bytes"
+	"encoding/csv"
+	"os/exec"
+	"strings"
+	"syscall"
+
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -26,7 +32,33 @@ func List() (string, error) {
 		}
 		rows = append(rows, describeService(m, name))
 	}
-	return FormatList(rows), nil
+	text := FormatList(rows)
+	if status, ok := legacyLogonTaskStatus(); ok {
+		text += FormatLegacyLogonTask(status)
+	}
+	return text, nil
+}
+
+// legacyLogonTaskStatus reads the old logon task named kite-agent, if it
+// still exists. The query does not change the task. A missing task or a
+// query error leaves list's service rows intact.
+func legacyLogonTaskStatus() (string, bool) {
+	cmd := exec.Command("schtasks.exe", "/Query", "/TN", ServiceName, "/FO", "CSV", "/NH")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	text := string(bytes.TrimPrefix(out, []byte{0xEF, 0xBB, 0xBF}))
+	rec, err := csv.NewReader(strings.NewReader(text)).Read()
+	if err != nil || len(rec) < 3 {
+		return "", false
+	}
+	status := strings.TrimSpace(rec[2])
+	if status == "" {
+		return "", false
+	}
+	return status, true
 }
 
 func describeService(m *mgr.Mgr, name string) ListedService {

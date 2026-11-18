@@ -2,6 +2,9 @@ package agentsvc
 
 import (
 	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 )
@@ -75,9 +78,31 @@ func UpgradeArguments(from, serviceName string) string {
 	return "upgrade --apply --from " + quoteWindowsArg(from) + " --service-name " + quoteWindowsArg(serviceName)
 }
 
-// UpgradeTaskXML is a Task Scheduler document with no trigger. The caller
-// starts it on demand. The principal is LOCAL SYSTEM, so the swap survives
-// the interactive session that launched it.
+// settingsSchemaOrder is the settingsType sequence from the Task Scheduler
+// 1.2 schema. schtasks rejects documents whose settings elements are out of
+// that order, and it rejects LogonType ServiceAccount outright on Windows 11.
+var settingsSchemaOrder = []string{
+	"AllowStartOnDemand",
+	"RestartOnFailure",
+	"MultipleInstancesPolicy",
+	"DisallowStartIfOnBatteries",
+	"StopIfGoingOnBatteries",
+	"AllowHardTerminate",
+	"StartWhenAvailable",
+	"RunOnlyIfNetworkAvailable",
+	"WakeToRun",
+	"Enabled",
+	"Hidden",
+	"DeleteExpiredTaskAfter",
+	"Priority",
+	"RunOnlyIfIdle",
+	"ExecutionTimeLimit",
+}
+
+// UpgradeTaskXML is a Task Scheduler document with no trigger. schtasks /Run
+// starts it. LOCAL SYSTEM is selected by UserId S-1-5-18 alone. LogonType is
+// omitted: Windows 11 schtasks rejects <LogonType>ServiceAccount</LogonType>
+// as "incorrectly formatted or out of range".
 func UpgradeTaskXML(exe, from, serviceName string) (string, error) {
 	canon, err := CanonicalServiceName(serviceName)
 	if err != nil {
@@ -92,18 +117,18 @@ func UpgradeTaskXML(exe, from, serviceName string) (string, error) {
 		Exec    exec   `xml:"Exec"`
 	}
 	type principal struct {
-		ID        string `xml:"id,attr"`
-		UserID    string `xml:"UserId"`
-		LogonType string `xml:"LogonType"`
-		RunLevel  string `xml:"RunLevel"`
+		ID       string `xml:"id,attr"`
+		UserID   string `xml:"UserId"`
+		RunLevel string `xml:"RunLevel"`
 	}
+	// Field order follows the 1.2 settingsType sequence.
 	type settings struct {
+		AllowStartOnDemand         bool   `xml:"AllowStartOnDemand"`
 		MultipleInstancesPolicy    string `xml:"MultipleInstancesPolicy"`
 		DisallowStartIfOnBatteries bool   `xml:"DisallowStartIfOnBatteries"`
 		StopIfGoingOnBatteries     bool   `xml:"StopIfGoingOnBatteries"`
 		AllowHardTerminate         bool   `xml:"AllowHardTerminate"`
 		StartWhenAvailable         bool   `xml:"StartWhenAvailable"`
-		AllowDemandStart           bool   `xml:"AllowDemandStart"`
 		Enabled                    bool   `xml:"Enabled"`
 		Hidden                     bool   `xml:"Hidden"`
 		ExecutionTimeLimit         string `xml:"ExecutionTimeLimit"`
@@ -113,7 +138,6 @@ func UpgradeTaskXML(exe, from, serviceName string) (string, error) {
 		Version     string   `xml:"version,attr"`
 		Xmlns       string   `xml:"xmlns,attr"`
 		Description string   `xml:"RegistrationInfo>Description"`
-		Triggers    struct{} `xml:"Triggers"`
 		Principals  struct {
 			Principal principal `xml:"Principal"`
 		} `xml:"Principals"`
@@ -124,12 +148,12 @@ func UpgradeTaskXML(exe, from, serviceName string) (string, error) {
 		Xmlns:       "http://schemas.microsoft.com/windows/2004/02/mit/task",
 		Description: "One-shot kite-agent binary swap for " + canon + ". Contains no secrets.",
 		Settings: settings{
+			AllowStartOnDemand:         true,
 			MultipleInstancesPolicy:    "IgnoreNew",
 			DisallowStartIfOnBatteries: false,
 			StopIfGoingOnBatteries:     false,
 			AllowHardTerminate:         true,
 			StartWhenAvailable:         true,
-			AllowDemandStart:           true,
 			Enabled:                    true,
 			Hidden:                     true,
 			ExecutionTimeLimit:         "PT10M",
@@ -143,14 +167,125 @@ func UpgradeTaskXML(exe, from, serviceName string) (string, error) {
 		},
 	}
 	doc.Principals.Principal = principal{
-		ID:        "Author",
-		UserID:    "S-1-5-18",
-		LogonType: "ServiceAccount",
-		RunLevel:  "HighestAvailable",
+		ID:       "Author",
+		UserID:   "S-1-5-18",
+		RunLevel: "HighestAvailable",
 	}
 	body, err := xml.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n" + string(body) + "\n", nil
+	// The in-memory document is UTF-8. writeUTF16File switches the declaration
+	// when it encodes the file schtasks reads.
+	text := "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + string(body) + "\n"
+	if err := validateUpgradeTaskXML(text); err != nil {
+		return "", err
+	}
+	return text, nil
+}
+
+// validateUpgradeTaskXML checks the document against the constraints schtasks
+// enforces on Windows 11. It cannot call schtasks itself.
+func validateUpgradeTaskXML(xmlText string) error {
+	if strings.Contains(xmlText, "LogonType") || strings.Contains(xmlText, "ServiceAccount") {
+		return errors.New("LogonType ServiceAccount is rejected by schtasks on Windows 11; select SYSTEM with UserId S-1-5-18 only")
+	}
+	if strings.Contains(xmlText, "AllowDemandStart") {
+		return errors.New("AllowDemandStart is not a Task Scheduler 1.2 element; use AllowStartOnDemand")
+	}
+	dec := xml.NewDecoder(strings.NewReader(xmlText))
+	var (
+		userID, runLevel, command, arguments string
+		settings                             []string
+		inSettings                           bool
+		depth                                int
+		settingsDepth                        int
+	)
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("task xml: %w", err)
+		}
+		switch el := tok.(type) {
+		case xml.StartElement:
+			depth++
+			switch el.Name.Local {
+			case "Settings":
+				inSettings = true
+				settingsDepth = depth
+			case "UserId":
+				if err := dec.DecodeElement(&userID, &el); err != nil {
+					return err
+				}
+				depth--
+			case "RunLevel":
+				if err := dec.DecodeElement(&runLevel, &el); err != nil {
+					return err
+				}
+				depth--
+			case "Command":
+				if err := dec.DecodeElement(&command, &el); err != nil {
+					return err
+				}
+				depth--
+			case "Arguments":
+				if err := dec.DecodeElement(&arguments, &el); err != nil {
+					return err
+				}
+				depth--
+			default:
+				if inSettings && depth == settingsDepth+1 {
+					settings = append(settings, el.Name.Local)
+				}
+			}
+		case xml.EndElement:
+			if el.Name.Local == "Settings" {
+				inSettings = false
+			}
+			depth--
+		}
+	}
+	if userID != "S-1-5-18" {
+		return fmt.Errorf("principal UserId = %q, want S-1-5-18 (LOCAL SYSTEM)", userID)
+	}
+	if runLevel != "HighestAvailable" {
+		return fmt.Errorf("principal RunLevel = %q, want HighestAvailable", runLevel)
+	}
+	if strings.TrimSpace(command) == "" {
+		return errors.New("task Exec Command is empty")
+	}
+	if !strings.Contains(arguments, "upgrade --apply") || !strings.Contains(arguments, "--from") || !strings.Contains(arguments, "--service-name") {
+		return fmt.Errorf("task arguments %q are missing the upgrade worker flags", arguments)
+	}
+	if strings.Contains(strings.ToLower(xmlText), "registration_key") {
+		return errors.New("task xml contains a registration key")
+	}
+	prev := -1
+	sawDemand := false
+	for _, name := range settings {
+		if name == "AllowStartOnDemand" {
+			sawDemand = true
+		}
+		idx := -1
+		for i, schemaName := range settingsSchemaOrder {
+			if schemaName == name {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			return fmt.Errorf("settings element %q is not in the Task Scheduler 1.2 schema", name)
+		}
+		if idx < prev {
+			return fmt.Errorf("settings element %q is out of schema order", name)
+		}
+		prev = idx
+	}
+	if !sawDemand {
+		return errors.New("settings missing AllowStartOnDemand")
+	}
+	return nil
 }

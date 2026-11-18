@@ -60,28 +60,37 @@ func scheduleUpgrade(opt UpgradeOptions) error {
 	if err := os.MkdirAll(filepath.Dir(lay.ConfigPath), 0o755); err != nil {
 		return err
 	}
+	result := UpgradeResultFile(lay)
+	appendUpgradeLog(result, "scheduling upgrade of "+name+" from "+from)
 	xmlText, err := UpgradeTaskXML(from, from, name)
 	if err != nil {
+		appendUpgradeLog(result, "upgrade failed: "+err.Error())
 		return err
 	}
 	xmlPath := filepath.Join(filepath.Dir(lay.ConfigPath), "upgrade-task.xml")
 	if err := writeUTF16File(xmlPath, xmlText); err != nil {
+		appendUpgradeLog(result, "upgrade failed: "+err.Error())
 		return err
 	}
 	task := UpgradeTaskName(name)
 	if err := schtasks("/Create", "/TN", task, "/XML", xmlPath, "/F"); err != nil {
+		_ = os.Remove(xmlPath)
+		appendUpgradeLog(result, "register upgrade task failed: "+err.Error())
 		return fmt.Errorf("register upgrade task: %w", err)
 	}
 	fmt.Printf("Scheduled upgrade of service %s.\n", name)
 	fmt.Printf("New binary: %s\n", from)
 	fmt.Printf("A one-shot SYSTEM task (%s) stops the service, replaces the exe, and starts it.\n", task)
 	fmt.Printf("This session can disconnect when the tunnel restarts. The task still finishes.\n")
-	fmt.Printf("Result: %s\n", UpgradeResultFile(lay))
+	fmt.Printf("Result: %s\n", result)
 	os.Stdout.Sync()
 	if err := schtasks("/Run", "/TN", task); err != nil {
 		_ = schtasks("/Delete", "/TN", task, "/F")
+		_ = os.Remove(xmlPath)
+		appendUpgradeLog(result, "start upgrade task failed: "+err.Error())
 		return fmt.Errorf("start upgrade task: %w", err)
 	}
+	appendUpgradeLog(result, "upgrade task started: "+task)
 	return nil
 }
 
@@ -100,8 +109,7 @@ func applyUpgrade(opt UpgradeOptions) error {
 	}
 	result := UpgradeResultFile(lay)
 	note := func(msg string) {
-		_ = os.MkdirAll(filepath.Dir(result), 0o755)
-		_ = os.WriteFile(result, []byte(msg+"\n"), 0o644)
+		appendUpgradeLog(result, msg)
 	}
 	lock := filepath.Join(filepath.Dir(lay.ConfigPath), "upgrade.lock")
 	release, err := takeUpgradeLock(lock)
@@ -114,6 +122,7 @@ func applyUpgrade(opt UpgradeOptions) error {
 	}
 	defer release()
 	task := UpgradeTaskName(name)
+	// Delete the task after the swap, including on failure, so it cannot run again.
 	defer func() {
 		_ = schtasks("/Delete", "/TN", task, "/F")
 		_ = os.Remove(filepath.Join(filepath.Dir(lay.ConfigPath), "upgrade-task.xml"))
@@ -216,6 +225,21 @@ func takeUpgradeLock(path string) (func(), error) {
 	return nil, errUpgradeBusy
 }
 
+func appendUpgradeLog(path, msg string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339), msg)
+}
+
 func schtasks(args ...string) error {
 	cmd := exec.Command("schtasks.exe", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -231,6 +255,7 @@ func schtasks(args ...string) error {
 }
 
 func writeUTF16File(path, content string) error {
+	content = strings.Replace(content, `encoding="UTF-8"`, `encoding="UTF-16"`, 1)
 	encoded := utf16.Encode([]rune(content))
 	buf := make([]byte, 2+len(encoded)*2)
 	buf[0] = 0xFF

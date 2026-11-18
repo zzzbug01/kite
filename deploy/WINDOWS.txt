@@ -57,8 +57,53 @@ macOS uses deploy/com.kite.agent.plist. Neither file is in this zip.
 中文
 ====
 
-在提升权限的 PowerShell 里设置 RELAY_ADDR、REGISTRATION_KEY、AGENT_NAME，
-然后运行 .\kite-agent.exe install。服务开机启动，没有控制台窗口。
-配置文件是 %ProgramData%\kite\config.yaml，不要把它提交到 git。
-kite-agent status 查看状态。stop / start / uninstall 需要管理员权限。
-uninstall 不会删除配置文件。日志是 %ProgramData%\kite\kite-agent.log。
+kite-agent 作为 Windows 服务运行。开机就会启动，不需要有人登录，也不会弹出
+控制台窗口。
+
+在本目录用提升权限的 PowerShell（以管理员身份运行）：
+
+    $env:RELAY_ADDR = "wss://tunnel.example.com/agent"
+    $env:REGISTRATION_KEY = "CHANGE_ME"
+    $env:AGENT_NAME = "my-pc"
+    .\kite-agent.exe install
+    .\kite-agent.exe status
+
+运行前换掉 CHANGE_ME 和 tunnel.example.com。install 会拒绝这两个占位符。
+
+服务读取 %ProgramData%\kite\config.yaml，除非你用 --config 指向用户配置目录
+以外的路径。这个文件里有注册密钥，不要提交到 git。服务的命令行只有程序路径
+和 --config。LocalSystem 不会加载你的用户环境或配置目录。
+
+    kite-agent status     （不需要提升权限）
+    kite-agent list       （不需要提升权限；列出 kite-agent 和 kite-agent-*）
+    kite-agent stop       （需要提升权限）
+    kite-agent start      （需要提升权限）
+    kite-agent restart    （需要提升权限）
+    kite-agent uninstall  （需要提升权限；配置文件会留下来）
+
+日志：%ProgramData%\kite\kite-agent.log
+
+可以在 kite-agent 旁边再装一个服务。请使用不同的 AGENT_NAME，避免中继踢掉
+你正在用的隧道：
+
+    .\kite-agent.exe install --service-name kite-agent-test
+
+它的文件在 %ProgramFiles%\kite\kite-agent-test\ 和
+%ProgramData%\kite\kite-agent-test\。status、start、stop、restart、uninstall
+都要带同一个 --service-name。只有默认名称会删除旧的登录计划任务。
+list 如果发现旧的登录任务 kite-agent 还在，会多打一行只读说明。
+
+即使这条 SSH 会话会在隧道重启时断开，也可以替换正在运行的程序：
+
+    .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
+    .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe --service-name kite-agent-test
+
+upgrade 注册一个以 SYSTEM 运行的一次性任务后就返回。任务会停掉服务、覆盖
+exe、再启动服务。结果写在 %ProgramData%\kite\upgrade.log，其它实例写在
+%ProgramData%\kite\<service-name>\upgrade.log。
+
+本压缩包里的 install-kite-agent.ps1 调用同一条 install 命令。它不会注册登录
+计划任务。用 -ServiceName 安装另一个实例。
+
+Linux 的 systemd 单元和 macOS 的 plist 在源码仓库的 deploy\ 目录里，不在
+这个压缩包中。

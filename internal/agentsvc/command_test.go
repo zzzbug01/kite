@@ -233,6 +233,13 @@ func TestFormatStatus(t *testing.T) {
 			t.Fatalf("missing %q in\n%s", want, got)
 		}
 	}
+	got = FormatStatus(StatusInfo{Name: "kite-agent-test", Installed: true, State: "stopped"})
+	if !strings.Contains(got, "kite-agent start --service-name kite-agent-test") {
+		t.Fatalf("stopped hint missing service name:\n%s", got)
+	}
+	if strings.Contains(got, "kite-agent start\n") {
+		t.Fatalf("stopped hint omitted --service-name:\n%s", got)
+	}
 }
 
 func TestRejectPlaceholderAndProfile(t *testing.T) {
@@ -386,10 +393,22 @@ func TestUpgradeCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"S-1-5-18", "upgrade --apply", "kite-agent-test", `D:\new\kite-agent.exe`, "ServiceAccount"} {
+	for _, want := range []string{"S-1-5-18", "HighestAvailable", "AllowStartOnDemand", "upgrade --apply", "kite-agent-test", `D:\new\kite-agent.exe`} {
 		if !strings.Contains(xmlText, want) {
 			t.Fatalf("xml missing %q\n%s", want, xmlText)
 		}
+	}
+	if err := validateUpgradeTaskXML(xmlText); err != nil {
+		t.Fatal(err)
+	}
+	// The path from the Windows 11 self-test. schtasks rejected the previous
+	// document at LogonType:ServiceAccount.
+	real, err := UpgradeTaskXML(`C:\Users\98596\kite-test\kite-agent-upgrade.exe`, `C:\Users\98596\kite-test\kite-agent-upgrade.exe`, "kite-agent-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(real, "LogonType") || strings.Contains(real, "ServiceAccount") {
+		t.Fatalf("rejected principal leaked into xml:\n%s", real)
 	}
 	if strings.Contains(xmlText, "REGISTRATION_KEY") || strings.Contains(xmlText, "registration_key") {
 		t.Fatal(xmlText)
@@ -444,6 +463,16 @@ func TestListFormatting(t *testing.T) {
 	}
 	if agentNameFromConfig(filepath.Join(dir, "missing.yaml")) != "-" {
 		t.Fatal("missing config")
+	}
+}
+
+func TestFormatLegacyLogonTask(t *testing.T) {
+	if FormatLegacyLogonTask("") != "" {
+		t.Fatal("empty status")
+	}
+	got := FormatLegacyLogonTask("Running")
+	if got != "legacy logon task kite-agent: Running\n" {
+		t.Fatal(got)
 	}
 }
 
