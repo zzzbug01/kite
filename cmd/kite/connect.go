@@ -18,7 +18,10 @@ import (
 func runConnect(args []string) error {
 	cfg, err := config.LoadClient(config.PeekConfigFlag(args))
 	if err != nil {
-		return err
+		if !os.IsNotExist(err) {
+			return err
+		}
+		cfg = config.Client{}
 	}
 	fs := flag.NewFlagSet("kite connect", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)

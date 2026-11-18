@@ -215,6 +215,7 @@ func writeKeys(path string, body []byte, kind Kind, owner string) error {
 		return fmt.Errorf("%s is a symlink; refusing to follow it", path)
 	}
 	dir := filepath.Dir(path)
+	body = normalizeNewlines(path, body)
 	tmp := filepath.Join(dir, fmt.Sprintf(".authorized_keys.%d.tmp", os.Getpid()))
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -245,6 +246,18 @@ func writeKeys(path string, body []byte, kind Kind, owner string) error {
 		return err
 	}
 	return nil
+}
+
+// normalizeNewlines keeps the destination's existing newline style. A new
+// file stays LF. Windows OpenSSH accepts both; rewriting CRLF to LF makes
+// the file look modified to tools that track the original bytes.
+func normalizeNewlines(path string, body []byte) []byte {
+	prev, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(prev, []byte("\r\n")) {
+		return body
+	}
+	body = bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(body, []byte("\n"), []byte("\r\n"))
 }
 
 func parsePair(line string) (Record, bool) {

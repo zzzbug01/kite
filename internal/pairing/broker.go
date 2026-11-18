@@ -1,6 +1,7 @@
 package pairing
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -60,6 +61,7 @@ type pending struct {
 	clientURL string
 	expires   time.Time
 	used      bool
+	inflight  bool
 }
 
 // NewBroker builds a broker. Zero Config fields take the defaults.
@@ -156,26 +158,25 @@ func (b *Broker) TouchRedeem(ip string) error {
 	return nil
 }
 
-// Redeem consumes code. A second call with the same code returns ErrCodeUsed.
-// A wrong code returns ErrCodeInvalid and does not affect other codes.
-func (b *Broker) Redeem(ip, code string) (Issued, error) {
+// ErrCodeBusy means another redeem of this code is in progress. It is not used.
+var ErrCodeBusy = errors.New("pairing code is in use; retry")
+
+// Begin reserves a code without consuming it. Call done(true) after the
+// agent accepts the key, or done(false) to leave the code usable until it
+// expires. A second Begin while one is in flight returns ErrCodeBusy.
+func (b *Broker) Begin(ip, code string) (Issued, func(success bool), error) {
 	now := b.now()
 	if !b.lim.AllowAll(now, Rule{Key: "redeem:ip:" + ip, Limit: b.redeemIP, Window: b.window}) {
-		return Issued{}, ErrRateLimited
+		return Issued{}, nil, ErrRateLimited
 	}
 	norm, err := NormalizeCode(code)
 	if err != nil {
-		// Still compare a dummy so a short code is not a cheaper reject
-		// than a well-formed miss. The real scan happens below only for
-		// well-formed codes; the dummy compare covers the malformed path.
 		_ = matchHash(nil, hashCode("AAAAAAAA"))
-		return Issued{}, ErrCodeInvalid
+		return Issued{}, nil, ErrCodeInvalid
 	}
 	sum := hashCode(norm)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	// Classify before sweeping. Sweeping first would make an expired code
-	// look the same as a code that never existed.
 	hashes := make([][]byte, len(b.codes))
 	for i, c := range b.codes {
 		hashes[i] = c.hash
@@ -183,24 +184,42 @@ func (b *Broker) Redeem(ip, code string) (Issued, error) {
 	idx := matchHash(hashes, sum)
 	if idx < 0 {
 		b.sweep(now)
-		return Issued{}, ErrCodeInvalid
+		return Issued{}, nil, ErrCodeInvalid
 	}
 	c := b.codes[idx]
 	if c.used {
 		b.sweep(now)
-		return Issued{}, ErrCodeUsed
+		return Issued{}, nil, ErrCodeUsed
 	}
 	if !now.Before(c.expires) {
 		b.sweep(now)
-		return Issued{}, ErrCodeExpired
+		return Issued{}, nil, ErrCodeExpired
 	}
-	c.used = true
-	return Issued{
-		Agent:     c.agent,
-		SSHUser:   c.sshUser,
-		ClientURL: c.clientURL,
-		Expires:   c.expires,
-	}, nil
+	if c.inflight {
+		return Issued{}, nil, ErrCodeBusy
+	}
+	c.inflight = true
+	issued := Issued{Agent: c.agent, SSHUser: c.sshUser, ClientURL: c.clientURL, Expires: c.expires}
+	done := func(success bool) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if success {
+			c.used = true
+		}
+		c.inflight = false
+	}
+	return issued, done, nil
+}
+
+// Redeem consumes code. A second call with the same code returns ErrCodeUsed.
+// A wrong code returns ErrCodeInvalid and does not affect other codes.
+func (b *Broker) Redeem(ip, code string) (Issued, error) {
+	issued, done, err := b.Begin(ip, code)
+	if err != nil {
+		return Issued{}, err
+	}
+	done(true)
+	return issued, nil
 }
 
 // Outstanding is the number of unexpired, unused codes. Tests use it.

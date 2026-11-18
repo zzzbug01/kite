@@ -74,5 +74,12 @@ func (OS) Start(ctx context.Context) error {
 }
 
 func (OS) Detect(ctx context.Context) (string, error) {
-	return sshaddr.Detect(ctx)
+	out := sshaddr.Detect(ctx)
+	if !out.Confident || out.Addr == "" {
+		if out.Detail == "" {
+			return "", fmt.Errorf("local ssh detection was inconclusive")
+		}
+		return "", fmt.Errorf("%s", out.Detail)
+	}
+	return out.Addr, nil
 }

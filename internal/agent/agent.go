@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,11 +55,53 @@ type Config struct {
 	EnableHeal bool
 	// Heal overrides the production healer. Tests leave it nil.
 	Heal *sshheal.Healer
+	// Users is the live SSH account. pair updates it when a LocalSystem
+	// service was installed without ssh_user.
+	Users *SSHUsers
+	// ServiceName selects the state directory for a side-by-side instance.
+	ServiceName string
+}
+
+// SSHUsers is the account that should receive paired keys. It is shared by
+// the relay session and the local control server.
+type SSHUsers struct {
+	mu   sync.Mutex
+	name string
+}
+
+// Get returns the current SSH user.
+func (s *SSHUsers) Get() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.name
+}
+
+// Set records a non-machine SSH user.
+func (s *SSHUsers) Set(name string) {
+	if s == nil || IsMachineAccount(name) {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	s.name = name
+	s.mu.Unlock()
 }
 
 // Run dials the relay and reconnects with exponential backoff until ctx ends.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = cfg.normalized()
+	if cfg.Users == nil {
+		cfg.Users = &SSHUsers{}
+	}
+	if !IsMachineAccount(cfg.SSHUser) {
+		cfg.Users.Set(cfg.SSHUser)
+	}
 	if cfg.EnableHeal && cfg.Heal == nil {
 		cfg.Heal = sshheal.New(sshheal.OS{}, cfg.LocalSSHAddr, cfg.LocalSSHAuto, healthFile(cfg.ConfigPath), cfg.ConfigPath, cfg.logger(), nil)
 	}

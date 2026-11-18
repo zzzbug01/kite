@@ -39,6 +39,12 @@ mode 0600) and sends only the public key. For an administrator, the agent
 writes C:\ProgramData\ssh\administrators_authorized_keys and tightens the
 ACL to SYSTEM and Administrators. Other accounts use that user's
 .ssh\authorized_keys. The comment is "kite-pair <label> <date>".
+Rewriting that file keeps its existing line endings. A LocalSystem
+service whose config has no ssh_user must not pair as the computer
+account (NAME$). Run kite-agent pair from the account you SSH as, or
+set ssh_user. install and upgrade fill ssh_user from the invoking user
+when it is missing or is a machine account. A failed pair does not
+consume the code.
 
     kite-agent unpair --list
     kite-agent unpair --revoke laptop
@@ -118,7 +124,11 @@ install 的用户在服务运行时不需要再提权。在笔记本上：
 笔记本上（~/.ssh/kite_my-pc，权限 0600），只发送公钥。管理员账户会写到
 C:\ProgramData\ssh\administrators_authorized_keys，并把 ACL 收成只有 SYSTEM
 和管理员。其它账户使用该用户的 .ssh\authorized_keys。注释是
-「kite-pair <标签> <日期>」。
+「kite-pair <标签> <日期>」。重写这个文件时会保留原来的换行风格。
+以 LocalSystem 运行、配置里没有 ssh_user 的服务不能把计算机账户
+（NAME$）当成 SSH 用户。请用你要登录的账户执行 kite-agent pair，或写上
+ssh_user。install 和 upgrade 在 ssh_user 为空或是计算机账户时，会填上
+执行命令的用户。配对失败不会作废配对码。
 
     kite-agent unpair --list
     kite-agent unpair --revoke laptop

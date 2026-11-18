@@ -65,6 +65,7 @@ type ClientAgent struct {
 	Token        string `yaml:"token"`
 	User         string `yaml:"user,omitempty"`
 	IdentityFile string `yaml:"identity_file,omitempty"`
+	RelayAddr    string `yaml:"relay_addr,omitempty"`
 }
 
 type ClientSection struct {
@@ -105,8 +106,12 @@ type Agent struct {
 type Client struct {
 	RelayAddr       string
 	RegistrationKey string
-	IdleTimeout     time.Duration
-	Agents          map[string]ClientAgent
+	// FileRelayAddr and FileRegistrationKey are the values from the config
+	// file before environment defaults are applied. A paired host uses these.
+	FileRelayAddr       string
+	FileRegistrationKey string
+	IdleTimeout         time.Duration
+	Agents              map[string]ClientAgent
 }
 
 // LoadRelay resolves relay settings. explicitPath, when non-empty, must exist.
@@ -232,10 +237,12 @@ func LoadClient(explicitPath string) (Client, error) {
 		return Client{}, err
 	}
 	cfg := Client{
-		IdleTimeout:     protocol.DefaultIdleTimeout,
-		RelayAddr:       file.Client.RelayAddr,
-		RegistrationKey: file.Client.RegistrationKey,
-		Agents:          file.Client.Agents,
+		IdleTimeout:         protocol.DefaultIdleTimeout,
+		RelayAddr:           file.Client.RelayAddr,
+		FileRelayAddr:       file.Client.RelayAddr,
+		RegistrationKey:     file.Client.RegistrationKey,
+		FileRegistrationKey: file.Client.RegistrationKey,
+		Agents:              file.Client.Agents,
 	}
 	if d, err := parseDuration(file.Client.IdleTimeout); err != nil {
 		return Client{}, fmt.Errorf("client.idle_timeout: %w", err)
@@ -264,15 +271,118 @@ func LoadClient(explicitPath string) (Client, error) {
 // wins over the shared registration key so a laptop can keep working after
 // the shared key is rotated.
 func (c Client) CredentialFor(agent string) (secret, kind string, err error) {
+	_, secret, kind, err = c.Endpoint(agent)
+	return secret, kind, err
+}
+
+// Endpoint is the relay URL and credential for one agent. A paired host
+// uses the relay address and token stored in the config file. Environment
+// variables only fill those in when the file has no host entry.
+func (c Client) Endpoint(agent string) (relay, secret, kind string, err error) {
 	if c.Agents != nil {
 		if a, ok := c.Agents[agent]; ok && strings.TrimSpace(a.Token) != "" {
-			return a.Token, "client", nil
+			relay = firstNonEmpty(a.RelayAddr, c.FileRelayAddr)
+			if relay == "" {
+				relay = c.RelayAddr
+			}
+			if relay == "" {
+				return "", "", "", fmt.Errorf("no relay address for %s; pass --relay or set it in the config file", agent)
+			}
+			return relay, a.Token, "client", nil
 		}
 	}
 	if strings.TrimSpace(c.RegistrationKey) != "" {
-		return c.RegistrationKey, "registration", nil
+		if strings.TrimSpace(c.RelayAddr) == "" {
+			return "", "", "", fmt.Errorf("no relay address for %s; set RELAY_ADDR or client.relay_addr", agent)
+		}
+		return c.RelayAddr, c.RegistrationKey, "registration", nil
 	}
-	return "", "", fmt.Errorf("no credential for %s; run kite connect or set REGISTRATION_KEY", agent)
+	return "", "", "", fmt.Errorf("no credential for %s; run kite connect or set REGISTRATION_KEY", agent)
+}
+
+// FileRelay reads the relay URL stored in a YAML config or an agent env file.
+// The process environment is ignored, so a hint printed for one instance is
+// not replaced by RELAY_ADDR from the shell that ran the command.
+func FileRelay(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := string(b)
+	var doc struct {
+		Agent struct {
+			RelayAddr string `yaml:"relay_addr"`
+		} `yaml:"agent"`
+	}
+	if yaml.Unmarshal(b, &doc) == nil {
+		if v := strings.TrimSpace(doc.Agent.RelayAddr); v != "" {
+			return v
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "RELAY_ADDR" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		val = strings.Trim(val, `"'`)
+		return val
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// SetSSHUser writes agent.ssh_user when it is empty or a machine account.
+// A real user already in the file is left unchanged.
+func SetSSHUser(path, sshUser string) error {
+	sshUser = strings.TrimSpace(sshUser)
+	if path == "" || sshUser == "" || strings.HasSuffix(sshUser, "$") {
+		return errors.New("ssh user is required")
+	}
+	root := map[string]any{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	agent, _ := root["agent"].(map[string]any)
+	if agent == nil {
+		agent = map[string]any{}
+	}
+	cur, _ := agent["ssh_user"].(string)
+	cur = strings.TrimSpace(cur)
+	if cur != "" && !strings.HasSuffix(cur, "$") && !strings.EqualFold(cur, "system") && !strings.EqualFold(cur, "localservice") && !strings.EqualFold(cur, "networkservice") {
+		return nil
+	}
+	agent["ssh_user"] = sshUser
+	root["agent"] = agent
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writePrivate(path, buf.Bytes())
 }
 
 // SetLocalSSH updates agent.local_ssh_addr in an existing file and records
@@ -353,6 +463,9 @@ func MergeClient(path string, upd ClientUpdate) error {
 		agents = map[string]any{}
 	}
 	entry := map[string]any{"token": upd.Token}
+	if upd.RelayAddr != "" {
+		entry["relay_addr"] = upd.RelayAddr
+	}
 	if upd.User != "" {
 		entry["user"] = upd.User
 	}

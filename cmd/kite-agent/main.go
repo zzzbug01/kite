@@ -10,10 +10,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/zzzbug01/kite/internal/agent"
+	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/process"
@@ -62,8 +64,10 @@ func run(args []string) error {
 				return setupErr
 			}
 		}
-		if opt.Config.SSHUser == "" {
-			opt.Config.SSHUser = defaultSSHUser()
+		if opt.Config.SSHUser == "" || agent.IsMachineAccount(opt.Config.SSHUser) {
+			if u := defaultSSHUser(); u != "" {
+				opt.Config.SSHUser = u
+			}
 		}
 		if opt.Config.SSHUser == "" {
 			fmt.Fprintln(os.Stdout, "ssh user: not set; set SSH_USER before pairing if this process runs as root or LocalSystem")
@@ -71,12 +75,16 @@ func run(args []string) error {
 			fmt.Fprintf(os.Stdout, "ssh user: %s\n", opt.Config.SSHUser)
 		}
 		if !opt.Config.LocalExplicit {
-			if addr, err := sshaddr.Detect(context.Background()); err != nil {
-				fmt.Fprintf(os.Stdout, "local ssh: detection failed (%s); using %s\n", err, opt.Config.LocalSSHAddr)
-			} else if addr != "" {
-				opt.Config.LocalSSHAddr = addr
+			out := sshaddr.Detect(context.Background())
+			if out.Detail != "" {
+				fmt.Fprintln(os.Stdout, out.Detail)
+			}
+			if out.Confident && out.Addr != "" {
+				opt.Config.LocalSSHAddr = out.Addr
 				opt.Config.LocalSSHAuto = true
-				fmt.Fprintf(os.Stdout, "local ssh: %s (auto)\n", addr)
+				fmt.Fprintf(os.Stdout, "local ssh: %s (auto)\n", out.Addr)
+			} else {
+				fmt.Fprintf(os.Stdout, "local ssh: not marking %s as auto; set LOCAL_SSH_ADDR if that port is wrong\n", opt.Config.LocalSSHAddr)
 			}
 		} else {
 			fmt.Fprintf(os.Stdout, "local ssh: %s (configured)\n", opt.Config.LocalSSHAddr)
@@ -111,7 +119,7 @@ func run(args []string) error {
 		}
 		return agentsvc.Restart(name)
 	case agentsvc.CmdStatus:
-		name, done, err := controlName("status", rest)
+		name, cfgPath, done, err := controlOptions("status", rest)
 		if done || err != nil {
 			return err
 		}
@@ -126,13 +134,20 @@ func run(args []string) error {
 			text = "Service control is the Windows service. On Linux use systemctl; on macOS use launchctl.\n"
 		}
 		paths := sshheal.Search()
+		if cfgPath != "" {
+			paths = append([]string{sshheal.File(cfgPath)}, paths...)
+		}
 		if runtime.GOOS == "windows" {
 			if lay, err := agentsvc.DefaultLayout(name); err == nil {
-				paths = []string{sshheal.File(lay.ConfigPath)}
+				paths = append([]string{sshheal.File(lay.ConfigPath)}, paths...)
 			}
+		} else {
+			paths = append([]string{sshheal.File(agentctl.UnixControlPath(name))}, paths...)
+			// Health sits next to the control file's directory.
+			paths = append([]string{filepath.Join(filepath.Dir(agentctl.UnixControlPath(name)), "ssh-health.json")}, paths...)
 		}
 		fmt.Fprint(os.Stdout, text)
-		fmt.Fprintln(os.Stdout, sshheal.LoadFirst(paths).Line())
+		fmt.Fprintln(os.Stdout, sshheal.LoadFirst(paths).Text())
 		return nil
 	case agentsvc.CmdList:
 		if err := agentsvc.ParseList(rest); err != nil {
@@ -155,6 +170,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		rememberSSHUser(opt.ServiceName, "")
 		return agentsvc.Upgrade(opt)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, agentsvc.Usage())
@@ -220,15 +236,20 @@ func ready(args []string, install bool) (agentsvc.Options, bool, error) {
 	return opt, false, nil
 }
 
-func controlName(command string, args []string) (string, bool, error) {
-	name, err := agentsvc.ParseControl(command, args)
+func controlOptions(command string, args []string) (string, string, bool, error) {
+	name, cfg, err := agentsvc.ParseControlOptions(command, args)
 	if errors.Is(err, flag.ErrHelp) {
-		return "", true, nil
+		return "", "", true, nil
 	}
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
-	return name, false, nil
+	return name, cfg, false, nil
+}
+
+func controlName(command string, args []string) (string, bool, error) {
+	name, _, done, err := controlOptions(command, args)
+	return name, done, err
 }
 
 func runForeground(args []string) error {
@@ -279,5 +300,6 @@ func runAgent(ctx context.Context, opt agentsvc.Options) error {
 		ConfigPath:      opt.ConfigPath,
 		LocalSSHAuto:    opt.Config.LocalSSHAuto,
 		EnableHeal:      true,
+		ServiceName:     opt.ServiceName,
 	})
 }

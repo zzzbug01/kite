@@ -27,11 +27,12 @@ type System interface {
 
 // Health is the last local-SSH result written for `kite-agent status`.
 type Health struct {
-	Status string    `json:"status"`
-	Addr   string    `json:"addr,omitempty"`
-	From   string    `json:"from,omitempty"`
-	Detail string    `json:"detail,omitempty"`
-	At     time.Time `json:"at"`
+	Status  string    `json:"status"`
+	Addr    string    `json:"addr,omitempty"`
+	From    string    `json:"from,omitempty"`
+	Detail  string    `json:"detail,omitempty"`
+	At      time.Time `json:"at"`
+	History []Event   `json:"history,omitempty"`
 }
 
 // Line is the status text. Status values match the operator-facing phrases.
@@ -213,9 +214,53 @@ func (h *Healer) record(hv Health) {
 		return
 	}
 	if hv.At.IsZero() {
-		hv.At = time.Now().UTC()
+		hv.At = h.now()
+	}
+	prev := Read(path)
+	if hv.Status == "ok" {
+		hv.History = prev.History
+	} else {
+		hv.History = append(prev.History, Event{
+			Status: hv.Status,
+			Addr:   hv.Addr,
+			From:   hv.From,
+			Detail: hv.Detail,
+			At:     hv.At,
+		})
+		if len(hv.History) > 8 {
+			hv.History = hv.History[len(hv.History)-8:]
+		}
 	}
 	_ = Write(path, hv)
+}
+
+// Event is one earlier local-SSH action kept after a later ok.
+type Event struct {
+	Status string    `json:"status"`
+	Addr   string    `json:"addr,omitempty"`
+	From   string    `json:"from,omitempty"`
+	Detail string    `json:"detail,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// Text is the current line plus the short history.
+func (h Health) Text() string {
+	line := h.Line()
+	if len(h.History) == 0 {
+		return line
+	}
+	var b strings.Builder
+	b.WriteString(line)
+	for _, e := range h.History {
+		b.WriteByte('\n')
+		b.WriteString("  ")
+		if !e.At.IsZero() {
+			b.WriteString(e.At.In(time.Local).Format(time.RFC3339))
+			b.WriteString("  ")
+		}
+		b.WriteString(Health{Status: e.Status, Addr: e.Addr, From: e.From, Detail: e.Detail}.Line())
+	}
+	return b.String()
 }
 
 // Write stores health next to the agent config. The file has no secrets.
@@ -252,6 +297,7 @@ func Search() []string {
 		}
 		return []string{filepath.Join(root, "kite", "ssh-health.json")}
 	}
+	out = append(out, "/var/lib/kite-agent/ssh-health.json")
 	out = append(out, "/var/lib/kite/ssh-health.json")
 	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
 		out = append(out, filepath.Join(dir, "kite", "ssh-health.json"))

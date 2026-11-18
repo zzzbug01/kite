@@ -208,6 +208,26 @@ func TestRateLimitWindowSlides(t *testing.T) {
 	}
 }
 
+func TestBeginFailureDoesNotConsume(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	b := testBroker(&now)
+	code, _, err := b.Create("203.0.113.8", "my-pc", "me", "wss://tunnel.example.com/client", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, done, err := b.Begin("198.51.100.8", code)
+	if err != nil || issued.Agent != "my-pc" {
+		t.Fatal(err, issued)
+	}
+	if _, _, err := b.Begin("198.51.100.9", code); !errors.Is(err, ErrCodeBusy) {
+		t.Fatalf("second begin: %v", err)
+	}
+	done(false)
+	if _, err := b.Redeem("198.51.100.10", code); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSanitizeLabel(t *testing.T) {
 	if got := SanitizeLabel("my laptop"); got != "mylaptop" {
 		t.Fatal(got)

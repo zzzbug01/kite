@@ -15,7 +15,7 @@ import (
 
 type fakeHandler struct{}
 
-func (fakeHandler) Pair(context.Context, time.Duration) (string, string, time.Time, error) {
+func (fakeHandler) Pair(context.Context, time.Duration, string) (string, string, time.Time, error) {
 	return "ABCD-EFGH", "my-pc", time.Date(2026, 11, 18, 9, 10, 0, 0, time.UTC), nil
 }
 
@@ -82,6 +82,38 @@ func TestControlRoundTrip(t *testing.T) {
 	_, err = Call(ctx, bad, Request{Op: "pair"})
 	if err == nil || err.Error() != "unauthorized" {
 		t.Fatalf("bad token: %v", err)
+	}
+}
+
+type relayHandler struct{ fakeHandler }
+
+func (relayHandler) ClientURL() string { return "wss://instance.example/client" }
+
+func TestPairResponseIncludesRelay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent-control.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop, err := Start(ctx, path, relayHandler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+	resp, err := Call(ctx, path, Request{Op: "pair"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Relay != "wss://instance.example/client" {
+		t.Fatal(resp.Relay)
+	}
+}
+
+func TestNamedInstanceControlPathComesFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	paths := CandidatePaths("", "kite-agent-test")
+	if len(paths) == 0 || !strings.HasSuffix(paths[0], "/var/lib/kite-agent/kite-agent-test/agent-control.json") {
+		t.Fatal(paths)
 	}
 }
 

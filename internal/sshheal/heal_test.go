@@ -100,6 +100,21 @@ func TestExplicitAddressIsNotRewritten(t *testing.T) {
 	}
 }
 
+func TestHistorySurvivesOK(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	sys := &fakeSys{running: true, detected: "127.0.0.1:2222"}
+	path := filepath.Join(t.TempDir(), "h.json")
+	h := New(sys, "127.0.0.1:22", true, path, "", nil, func() time.Time { return now })
+	if !h.Recover(context.Background(), errors.New("refused")) {
+		t.Fatal("retry")
+	}
+	h.MarkOK("127.0.0.1:2222")
+	text := Read(path).Text()
+	if !strContains(text, "ok (127.0.0.1:2222)") || !strContains(text, "port changed from") {
+		t.Fatal(text)
+	}
+}
+
 func TestMarkOK(t *testing.T) {
 	h := New(&fakeSys{}, "127.0.0.1:22", true, filepath.Join(t.TempDir(), "h.json"), "", nil, nil)
 	h.MarkOK("127.0.0.1:22")

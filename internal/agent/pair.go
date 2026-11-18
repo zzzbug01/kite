@@ -14,6 +14,7 @@ import (
 
 	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/authkeys"
+	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/pairing"
 	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/sshheal"
@@ -72,13 +73,14 @@ func healthFile(configPath string) string {
 func startControl(ctx context.Context, cfg Config) (func(), error) {
 	path := cfg.ControlPath
 	if path == "" {
-		path = defaultControlPath(cfg.ConfigPath)
+		path = defaultControlPath(cfg)
 	}
 	h := controlHandler{cfg: cfg}
 	return agentctl.Start(ctx, path, h)
 }
 
-func defaultControlPath(configPath string) string {
+func defaultControlPath(cfg Config) string {
+	configPath := cfg.ConfigPath
 	if strings.TrimSpace(configPath) != "" {
 		return filepath.Join(filepath.Dir(configPath), "agent-control.json")
 	}
@@ -90,7 +92,7 @@ func defaultControlPath(configPath string) string {
 			}
 			return filepath.Join(root, "kite", "agent-control.json")
 		}
-		return "/var/lib/kite/agent-control.json"
+		return agentctl.UnixControlPath(cfg.ServiceName)
 	}
 	dir, err := os.UserConfigDir()
 	if err != nil || dir == "" {
@@ -103,7 +105,31 @@ type controlHandler struct {
 	cfg Config
 }
 
-func (h controlHandler) Pair(ctx context.Context, ttl time.Duration) (string, string, time.Time, error) {
+func (h controlHandler) adoptSSHUser(sshUser string) {
+	sshUser = leafName(sshUser)
+	if sshUser == "" || IsMachineAccount(sshUser) {
+		return
+	}
+	cur := ""
+	if h.cfg.Users != nil {
+		cur = h.cfg.Users.Get()
+	}
+	if cur == "" {
+		cur = h.cfg.SSHUser
+	}
+	if cur != "" && !IsMachineAccount(cur) {
+		return
+	}
+	if h.cfg.Users != nil {
+		h.cfg.Users.Set(sshUser)
+	}
+	if h.cfg.ConfigPath != "" {
+		_ = config.SetSSHUser(h.cfg.ConfigPath, sshUser)
+	}
+}
+
+func (h controlHandler) Pair(ctx context.Context, ttl time.Duration, sshUser string) (string, string, time.Time, error) {
+	h.adoptSSHUser(sshUser)
 	base, err := pairing.HTTPBase(h.cfg.RelayURL)
 	if err != nil {
 		return "", "", time.Time{}, err
@@ -112,7 +138,7 @@ func (h controlHandler) Pair(ctx context.Context, ttl time.Duration) (string, st
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
-	sshUser, _, _, _ := resolveUser(h.cfg)
+	sshUser, _, _, _ = resolveUser(h.cfg)
 	secs := 0
 	if ttl > 0 {
 		secs = int(ttl / time.Second)
@@ -128,6 +154,14 @@ func (h controlHandler) Pair(ctx context.Context, ttl time.Duration) (string, st
 		return "", "", time.Time{}, err
 	}
 	return resp.Code, resp.Agent, resp.ExpiresAt, nil
+}
+
+func (h controlHandler) ClientURL() string {
+	u, err := pairing.ClientURL(h.cfg.RelayURL)
+	if err != nil {
+		return ""
+	}
+	return u
 }
 
 func (h controlHandler) List(context.Context) ([]authkeys.Record, error) {
@@ -168,7 +202,13 @@ func AuthorizedKeys(cfg Config) (path string, kind authkeys.Kind, owner string, 
 }
 
 func resolveUser(cfg Config) (name, home string, admin bool, err error) {
-	name = leafName(cfg.SSHUser)
+	name = ""
+	if cfg.Users != nil {
+		name = leafName(cfg.Users.Get())
+	}
+	if name == "" || IsMachineAccount(name) {
+		name = leafName(cfg.SSHUser)
+	}
 	if name == "" {
 		u, uerr := user.Current()
 		if uerr != nil {
@@ -176,7 +216,7 @@ func resolveUser(cfg Config) (name, home string, admin bool, err error) {
 		}
 		name = leafName(u.Username)
 	}
-	if isMachineAccount(name) {
+	if IsMachineAccount(name) {
 		return "", "", false, errors.New("SSH_USER is required when kite-agent runs as a machine account; set ssh_user in the config")
 	}
 	if cfg.SSHAdmin != nil {
@@ -239,7 +279,16 @@ func leafName(name string) string {
 	return name
 }
 
-func isMachineAccount(name string) bool {
+// IsMachineAccount reports Windows built-in service accounts and computer
+// accounts (names that end in $), which cannot own an authorized_keys file.
+func IsMachineAccount(name string) bool {
+	name = leafName(name)
+	if name == "" {
+		return false
+	}
+	if strings.HasSuffix(name, "$") {
+		return true
+	}
 	switch strings.ToLower(name) {
 	case "system", "localservice", "networkservice":
 		return true

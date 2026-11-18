@@ -110,11 +110,11 @@ What `install` does to sshd, and does again if you re-run it:
 
 `kite-agent setup` is the same SSH check without registering the agent. `--skip-ssh-setup` skips it during install.
 
-If you did not set `LOCAL_SSH_ADDR` or `--local`, install reads `sshd_config` (including `Include` directories) and the addresses sshd is actually listening on. A loopback socket wins. A wildcard `ListenAddress` still dials `127.0.0.1`. The chosen address is written as `local_ssh_addr` with `local_ssh_addr_auto: true`. An address you set yourself is left alone.
+If you did not set `LOCAL_SSH_ADDR` or `--local`, install reads `sshd_config` when it can, then the sockets sshd owns, then any local listener that answers with an `SSH-2.0` banner. That address is written with `local_ssh_addr_auto: true`. If none of those checks succeed, install does not pretend port 22 was detected. An address you set yourself is left alone. A paired `Host` in `~/.config/kite/config.yaml` is used even when `RELAY_ADDR` or `REGISTRATION_KEY` is set in the environment; those variables only fill hosts that were not paired.
 
-While the agent is running, a failed dial of that address is retried at most once every 30 seconds. If sshd is stopped, root (or the Windows service) starts it and sets Automatic on Windows. If the saved address was auto-detected and sshd has moved, the agent switches and records `port changed from X to Y`. `kite-agent status` prints the last result: `ok`, `sshd stopped`, `started by kite`, `port changed from X to Y`, or `failed`.
+While the agent is running, a failed dial of that address is retried at most once every 30 seconds. If sshd is stopped, root on Linux or the Windows service starts it and sets Automatic on Windows. macOS self-heal does not turn Remote Login on; it prints `sudo systemsetup -setremotelogin on`. `setup` and `install` can still run that command when you ask them to. If the saved address was auto-detected and sshd has moved, the agent switches and records `port changed from X to Y`. `kite-agent status` prints the latest result and a short history of earlier start and port changes, so an `ok` does not hide them. On Linux and macOS, `status` accepts `--config` and `--service-name`. A second instance uses `/var/lib/kite-agent/<name>`, not the relay's `/var/lib/kite`. `kite-agent pair` records the interactive user as `ssh_user` when the service is LocalSystem and the config has none. A Windows computer account (`NAME$`) is not used. A pairing code stays valid until the agent accepts the key or the code expires.
 
-On Linux, root `install` also writes `/etc/kite/agent.env` (mode 0600), copies the binary to `/usr/local/bin/kite-agent`, and enables `kite-agent.service`. On macOS, root `install` bootstraps a LaunchDaemon that reads `/etc/kite/agent.env`. On Windows, `install` registers the Service Control Manager service described under Manual setup.
+On Linux, root `install` also writes `/etc/kite/agent.env` (mode 0600), copies the binary to `/usr/local/bin/kite-agent`, and enables `kite-agent.service`. On macOS, root `install` bootstraps a LaunchDaemon that reads `/etc/kite/agent.env`. `--service-name other` writes a separate unit or plist, `/etc/kite/other/agent.env`, and state under `/var/lib/kite-agent/other`. The default unit stays the file in `deploy/kite-agent.service`. On Windows, `install` registers the Service Control Manager service described under Manual setup.
 
 ### 3. Laptop
 
@@ -422,11 +422,11 @@ kite-agent pair
 
 `kite-agent setup` 只做 SSH 检查，不注册 agent。`install --skip-ssh-setup` 可以跳过这一步。
 
-如果没有设置 `LOCAL_SSH_ADDR` 或 `--local`，install 会读 `sshd_config`（包括 `Include` 目录）以及 sshd 当前正在监听的地址。优先用回环地址。`ListenAddress` 是任意地址时仍然拨 `127.0.0.1`。结果写入 `local_ssh_addr`，并标上 `local_ssh_addr_auto: true`。你自己写的地址不会被改掉。
+如果没有设置 `LOCAL_SSH_ADDR` 或 `--local`，install 会在能读到 `sshd_config` 时使用它，否则看 sshd 自己的监听端口，再探测本机哪些端口回了 `SSH-2.0` 横幅。确定之后才写入 `local_ssh_addr_auto: true`。都不确定时，不会把 22 假装成检测结果。你自己写的地址不会被改掉。`~/.config/kite/config.yaml` 里已经配对的主机优先于环境变量 `RELAY_ADDR` 和 `REGISTRATION_KEY`；环境变量只填那些还没配对的主机。
 
-agent 运行中如果拨这个地址失败，最多每 30 秒处理一次。sshd 没在跑时，root（Windows 上是服务）会尝试启动它，Windows 上还会把启动类型设成 Automatic。如果地址是自动检测的、而 sshd 已经换了端口，agent 会改过去，并记下 `port changed from X to Y`。`kite-agent status` 显示最近一次结果：`ok`、`sshd stopped`、`started by kite`、`port changed from X to Y` 或 `failed`。
+agent 运行中如果拨这个地址失败，最多每 30 秒处理一次。sshd 没在跑时，Linux 上的 root 或 Windows 服务会尝试启动它，Windows 上还会把启动类型设成 Automatic。macOS 的自愈不会自己打开远程登录，只会提示 `sudo systemsetup -setremotelogin on`；`setup` 和 `install` 在你要求时仍可以执行这条命令。如果地址是自动检测的、而 sshd 已经换了端口，agent 会改过去，并记下 `port changed from X to Y`。`kite-agent status` 显示最近一次结果，并保留最近几次启动和改端口的记录，后面的 `ok` 不会把它们盖掉。Linux 和 macOS 的 `status` 接受 `--config` 和 `--service-name`。第二个实例的状态目录是 `/var/lib/kite-agent/<名字>`，不和中继的 `/var/lib/kite` 混在一起。服务以 LocalSystem 运行且配置里没有 `ssh_user` 时，交互用户执行的 `kite-agent pair` 会把当前用户记下来。以 `$` 结尾的计算机账户不会被当成 SSH 用户。配对码在 agent 成功写入公钥之前不会作废，失败后在过期前可以重试。
 
-在 Linux 上，root 执行的 `install` 还会写入 `/etc/kite/agent.env`（权限 0600），把程序拷到 `/usr/local/bin/kite-agent`，并 enable `kite-agent.service`。在 macOS 上，root 执行的 `install` 会加载一个读取 `/etc/kite/agent.env` 的 LaunchDaemon。在 Windows 上，`install` 注册下面「手动安装」里说的服务。
+在 Linux 上，root 执行的 `install` 还会写入 `/etc/kite/agent.env`（权限 0600），把程序拷到 `/usr/local/bin/kite-agent`，并 enable `kite-agent.service`。在 macOS 上，root 执行的 `install` 会加载一个读取 `/etc/kite/agent.env` 的 LaunchDaemon。`--service-name other` 会另写一个 unit 或 plist、`/etc/kite/other/agent.env`，状态目录是 `/var/lib/kite-agent/other`。默认 unit 仍是 `deploy/kite-agent.service` 里的那份。在 Windows 上，`install` 注册下面「手动安装」里说的服务。
 
 ### 3. 笔记本
 

@@ -149,6 +149,58 @@ func TestConfigSearchSkipsMachinePathOffWindows(t *testing.T) {
 	}
 }
 
+func TestFileRelayIgnoresEnv(t *testing.T) {
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte("agent:\n  relay_addr: wss://instance.example/agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envPath := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(envPath, []byte("RELAY_ADDR=wss://named.example/agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAY_ADDR", "wss://evil.example/agent")
+	if got := FileRelay(yamlPath); got != "wss://instance.example/agent" {
+		t.Fatal(got)
+	}
+	if got := FileRelay(envPath); got != "wss://named.example/agent" {
+		t.Fatal(got)
+	}
+}
+
+func TestPairedHostBeatsEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := []byte("client:\n  relay_addr: wss://file.example/client\n  registration_key: file-key\n  agents:\n    my-pc:\n      token: kite_fromfile\n      relay_addr: wss://file.example/client\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAY_ADDR", "wss://evil.example/client")
+	t.Setenv("REGISTRATION_KEY", "env-key-value")
+	t.Setenv("KITE_CONFIG", "")
+	cfg, err := LoadClient(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, secret, kind, err := cfg.Endpoint("my-pc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relay != "wss://file.example/client" || secret != "kite_fromfile" || kind != "client" {
+		t.Fatalf("relay %s secret %s kind %s", relay, secret, kind)
+	}
+	if strings.Contains(relay, "evil") || secret == "env-key-value" {
+		t.Fatal("env overrode the paired host")
+	}
+	otherRelay, otherSecret, otherKind, err := cfg.Endpoint("unpaired")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherRelay != "wss://evil.example/client" || otherSecret != "env-key-value" || otherKind != "registration" {
+		t.Fatalf("defaults: %s %s %s", otherRelay, otherSecret, otherKind)
+	}
+}
+
 func TestDefaultsWithoutFile(t *testing.T) {
 	t.Setenv("KITE_CONFIG", "")
 	t.Setenv("REGISTRATION_KEY", "")

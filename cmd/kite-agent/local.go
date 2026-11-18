@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -43,11 +45,14 @@ func runSetup(args []string) error {
 	}
 	rep, err := sshsetup.Ensure(context.Background(), *local)
 	fmt.Fprint(os.Stdout, rep.Text())
-	if addr, derr := sshaddr.Detect(context.Background()); derr != nil {
-		fmt.Fprintf(os.Stdout, "local ssh: detection failed (%s); default %s\n", derr, *local)
+	out := sshaddr.Detect(context.Background())
+	if out.Detail != "" {
+		fmt.Fprintln(os.Stdout, out.Detail)
+	}
+	if out.Confident {
+		fmt.Fprintf(os.Stdout, "local ssh: %s (auto)\n", out.Addr)
 	} else {
-		fmt.Fprintf(os.Stdout, "local ssh: %s\n", addr)
-		fmt.Fprintln(os.Stdout, "install writes this address when local_ssh_addr was not set explicitly")
+		fmt.Fprintf(os.Stdout, "local ssh: detection inconclusive; not assuming %s\n", out.Addr)
 	}
 	return err
 }
@@ -90,16 +95,29 @@ func runPair(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var last error
+	sshUser := defaultSSHUser()
+	instCfg := instanceConfig(configPath, name)
+	if sshUser != "" && instCfg != "" {
+		_ = config.SetSSHUser(instCfg, sshUser)
+	}
 	for _, path := range agentctl.CandidatePaths(configPath, name) {
-		resp, err := agentctl.Call(ctx, path, agentctl.Request{Op: "pair", TTLSeconds: int(ttl.Seconds())})
+		resp, err := agentctl.Call(ctx, path, agentctl.Request{Op: "pair", TTLSeconds: int(ttl.Seconds()), SSHUser: sshUser})
 		if err != nil {
 			last = err
 			continue
 		}
-		printCode(resp.Agent, resp.Code, resp.Expires, relayHint(configPath))
+		hint := resp.Relay
+		if hint == "" {
+			hint = relayHint(relayFile(configPath, name))
+		}
+		printCode(resp.Agent, resp.Code, resp.Expires, hint)
 		return nil
 	}
-	cfg, loadErr := config.LoadAgent(configPath)
+	loadPath := instCfg
+	if loadPath == "" {
+		loadPath = configPath
+	}
+	cfg, loadErr := config.LoadAgent(loadPath)
 	if loadErr != nil {
 		return fmt.Errorf("%s\n%s", pairHelp(last), loadErr)
 	}
@@ -114,10 +132,16 @@ func runPair(args []string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.SSHUser != "" && !agent.IsMachineAccount(cfg.SSHUser) {
+		sshUser = cfg.SSHUser
+	}
+	if sshUser != "" && loadPath != "" {
+		_ = config.SetSSHUser(loadPath, sshUser)
+	}
 	resp, err := pairing.PostCreate(ctx, base, pairing.CreateRequest{
 		Key:        cfg.RegistrationKey,
 		Agent:      cfg.Name,
-		SSHUser:    cfg.SSHUser,
+		SSHUser:    sshUser,
 		ClientURL:  clientURL,
 		TTLSeconds: int(ttl.Seconds()),
 	})
@@ -239,12 +263,39 @@ func directUnpair(configPath string, list bool, label string) error {
 	return printUnpair(agentctl.Response{Removed: n}, label)
 }
 
-func relayHint(configPath string) string {
-	cfg, err := config.LoadAgent(configPath)
-	if err != nil || strings.TrimSpace(cfg.RelayAddr) == "" {
+func instanceConfig(flag, service string) string {
+	if strings.TrimSpace(flag) != "" {
+		return flag
+	}
+	if runtime.GOOS == "windows" {
+		lay, err := agentsvc.DefaultLayout(service)
+		if err == nil {
+			return lay.ConfigPath
+		}
+	}
+	return ""
+}
+
+func relayFile(flag, service string) string {
+	if p := instanceConfig(flag, service); p != "" {
+		return p
+	}
+	if runtime.GOOS == "windows" {
 		return ""
 	}
-	u, err := pairing.ClientURL(cfg.RelayAddr)
+	name := service
+	if name == "" || strings.EqualFold(name, agentsvc.ServiceName) {
+		return "/etc/kite/agent.env"
+	}
+	return filepath.Join("/etc/kite", name, "agent.env")
+}
+
+func relayHint(configPath string) string {
+	raw := config.FileRelay(configPath)
+	if raw == "" {
+		return ""
+	}
+	u, err := pairing.ClientURL(raw)
 	if err != nil {
 		return ""
 	}
@@ -290,10 +341,17 @@ func leaf(name string) string {
 }
 
 func machineAccount(name string) bool {
-	switch strings.ToLower(name) {
-	case "system", "localservice", "networkservice":
-		return true
-	default:
-		return false
+	return agent.IsMachineAccount(name)
+}
+
+func rememberSSHUser(serviceName, configPath string) {
+	userName := defaultSSHUser()
+	if userName == "" {
+		return
 	}
+	path := instanceConfig(configPath, serviceName)
+	if path == "" {
+		return
+	}
+	_ = config.SetSSHUser(path, userName)
 }

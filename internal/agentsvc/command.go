@@ -259,22 +259,33 @@ func ParseOptions(args []string, install bool) (Options, error) {
 
 // ParseControl reads --service-name for status, start, stop, restart, and uninstall.
 func ParseControl(command string, args []string) (string, error) {
+	name, _, err := ParseControlOptions(command, args)
+	return name, err
+}
+
+// ParseControlOptions also reads --config so status can find that instance's
+// local-SSH health file. --config is optional.
+func ParseControlOptions(command string, args []string) (name, configPath string, err error) {
 	fs := flag.NewFlagSet("kite-agent "+command, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var serviceName string
-	fs.StringVar(&serviceName, "service-name", "", "Windows service to act on (default kite-agent)")
+	configPath = config.PeekConfigFlag(args)
+	fs.StringVar(&serviceName, "service-name", "", "instance to act on (default kite-agent)")
+	fs.StringVar(&configPath, "config", configPath, "config file for this instance (health is stored beside it)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: kite-agent %s [--service-name name]\n\n", command)
-		fmt.Fprintf(fs.Output(), "Acts only on that Windows service. The default name is kite-agent.\n\n")
+		fmt.Fprintf(fs.Output(), "Usage: kite-agent %s [--service-name name] [--config path]\n\n", command)
+		fmt.Fprintf(fs.Output(), "On Windows this acts on one service. On Linux and macOS, status\n")
+		fmt.Fprintf(fs.Output(), "uses --service-name and --config to find that instance's local SSH health.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if fs.NArg() != 0 {
-		return "", errors.New("unexpected arguments")
+		return "", "", errors.New("unexpected arguments")
 	}
-	return CanonicalServiceName(serviceName)
+	name, err = CanonicalServiceName(serviceName)
+	return name, configPath, err
 }
 
 // ParseList accepts kite-agent list with no arguments.

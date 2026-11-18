@@ -88,16 +88,18 @@ func (s *Server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "public key must be one ssh-ed25519 line")
 		return
 	}
-	issued, err := s.broker.Redeem(ip, req.Code)
+	issued, done, err := s.broker.Begin(ip, req.Code)
 	if err != nil {
 		s.log.Info("pair redeem rejected", "remote", ip, "result", err.Error())
 		writeAPIError(w, redeemStatus(err), publicRedeemError(err))
 		return
 	}
+	ok := false
+	defer func() { done(ok) }()
 	agent := s.lookup(issued.Agent)
 	if agent == nil || !agent.supports(protocol.FeaturePair) {
 		s.log.Info("pair redeem rejected", "agent", issued.Agent, "remote", ip, "result", "agent unavailable")
-		writeAPIError(w, http.StatusConflict, "agent is not connected; the pairing code was consumed")
+		writeAPIError(w, http.StatusConflict, "agent is not connected; the pairing code was not consumed")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
@@ -109,7 +111,7 @@ func (s *Server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		s.log.Info("pair redeem rejected", "agent", issued.Agent, "remote", ip, "result", "no response")
-		writeAPIError(w, http.StatusConflict, "agent did not accept the pairing request; upgrade kite-agent on that machine if it is older than pairing support. The pairing code was consumed")
+		writeAPIError(w, http.StatusConflict, "agent did not accept the pairing request; upgrade kite-agent on that machine if it is older than pairing support. The pairing code was not consumed and can be retried until it expires")
 		return
 	}
 	if !res.OK {
@@ -118,7 +120,7 @@ func (s *Server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
 			msg = "agent rejected the public key"
 		}
 		s.log.Info("pair redeem rejected", "agent", issued.Agent, "remote", ip, "result", "agent error")
-		writeAPIError(w, http.StatusConflict, msg)
+		writeAPIError(w, http.StatusConflict, msg+"; the pairing code was not consumed")
 		return
 	}
 	sshUser := strings.TrimSpace(res.SSHUser)
@@ -135,6 +137,7 @@ func (s *Server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "could not store the client token")
 		return
 	}
+	ok = true
 	s.log.Info("pair redeem", "agent", issued.Agent, "remote", ip, "token_id", rec.ID, "label", rec.Label)
 	writeJSON(w, http.StatusOK, pairing.RedeemResponse{
 		Agent:       issued.Agent,
@@ -152,6 +155,8 @@ func redeemStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, pairing.ErrCodeExpired):
 		return http.StatusGone
+	case errors.Is(err, pairing.ErrCodeBusy):
+		return http.StatusConflict
 	default:
 		return http.StatusBadRequest
 	}
@@ -167,6 +172,8 @@ func publicRedeemError(err error) string {
 		return "pairing code expired"
 	case errors.Is(err, pairing.ErrCodeInvalid):
 		return "pairing code is not valid"
+	case errors.Is(err, pairing.ErrCodeBusy):
+		return "pairing code is in use; retry"
 	default:
 		return "pairing code was rejected"
 	}

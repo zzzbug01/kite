@@ -87,7 +87,7 @@ func run(args []string) error {
 		return errors.New("agent name is required")
 	}
 	cfg.IdleTimeout = *idle
-	secret, authKind, err := cfg.CredentialFor(fs.Arg(0))
+	relayURL, secret, authKind, err := cfg.Endpoint(fs.Arg(0))
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func run(args []string) error {
 	defer stop()
 
 	st, err := client.Dial(ctx, client.Config{
-		RelayURL:        cfg.RelayAddr,
+		RelayURL:        relayURL,
 		RegistrationKey: secret,
 		Auth:            authKind,
 		Agent:           fs.Arg(0),

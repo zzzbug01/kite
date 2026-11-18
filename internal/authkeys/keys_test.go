@@ -1,6 +1,7 @@
 package authkeys
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"os"
@@ -136,6 +137,28 @@ func TestUpsertListRevoke(t *testing.T) {
 	}
 	if n, err := Revoke(path, "laptop", KindPOSIX, ""); err != nil || n != 0 {
 		t.Fatalf("second revoke %d %v", n, err)
+	}
+}
+
+func TestPreservesCRLF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "authorized_keys")
+	key := sampleKey(t)
+	if err := os.WriteFile(path, []byte("ssh-ed25519 AAAA kept\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Upsert(path, key, "kite-pair laptop 2026-11-18", KindPOSIX, ""); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("\r\n")) || bytes.Contains(body, []byte("\n")) && !bytes.Contains(body, []byte("\r\n")) {
+		t.Fatalf("line endings changed: %q", body)
+	}
+	if bytes.Contains(bytes.ReplaceAll(body, []byte("\r\n"), nil), []byte("\n")) {
+		t.Fatalf("bare LF appeared: %q", body)
 	}
 }
 

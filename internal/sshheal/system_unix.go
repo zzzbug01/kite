@@ -36,11 +36,9 @@ func (OS) Start(ctx context.Context) error {
 		return fmt.Errorf("not root; cannot start sshd")
 	}
 	if runtime.GOOS == "darwin" {
-		out, err := exec.CommandContext(ctx, "systemsetup", "-setremotelogin", "on").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("systemsetup -setremotelogin on: %w (%s)", err, out)
-		}
-		return nil
+		// Remote Login is a machine setting. Runtime self-heal must not turn
+		// it on by itself. setup and install still print the command.
+		return fmt.Errorf("Remote Login is off; enable it with: sudo systemsetup -setremotelogin on")
 	}
 	var last error
 	for _, name := range []string{"ssh", "sshd"} {
@@ -57,5 +55,12 @@ func (OS) Start(ctx context.Context) error {
 }
 
 func (OS) Detect(ctx context.Context) (string, error) {
-	return sshaddr.Detect(ctx)
+	out := sshaddr.Detect(ctx)
+	if !out.Confident || out.Addr == "" {
+		if out.Detail == "" {
+			return "", fmt.Errorf("local ssh detection was inconclusive")
+		}
+		return "", fmt.Errorf("%s", out.Detail)
+	}
+	return out.Addr, nil
 }

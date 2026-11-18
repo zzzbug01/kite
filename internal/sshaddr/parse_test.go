@@ -3,6 +3,7 @@ package sshaddr
 import (
 	"os"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -84,6 +85,23 @@ func TestIncludeAndSockets(t *testing.T) {
 	}
 	if got := Address(Parsed{}, []string{"[::1]:22"}); got != "[::1]:22" {
 		t.Fatalf("v6 %s", got)
+	}
+}
+
+func TestDecideDoesNotGuessSilently(t *testing.T) {
+	out := Decide(Parsed{}, false, nil, []string{"127.0.0.1:2222", "127.0.0.1:80"}, func(addr string) bool {
+		return addr == "127.0.0.1:2222"
+	})
+	if !out.Confident || out.Addr != "127.0.0.1:2222" {
+		t.Fatalf("%+v", out)
+	}
+	guess := Decide(Parsed{}, false, nil, nil, func(string) bool { return false })
+	if guess.Confident || !strings.Contains(guess.Detail, "not marking") {
+		t.Fatalf("%+v", guess)
+	}
+	many := Decide(Parsed{}, false, nil, []string{"127.0.0.1:22", "127.0.0.1:2222"}, func(string) bool { return true })
+	if many.Confident {
+		t.Fatalf("%+v", many)
 	}
 }
 

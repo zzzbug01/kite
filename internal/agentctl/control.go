@@ -37,6 +37,7 @@ type Request struct {
 	Op         string `json:"op"`
 	TTLSeconds int    `json:"ttl_seconds,omitempty"`
 	Label      string `json:"label,omitempty"`
+	SSHUser    string `json:"ssh_user,omitempty"`
 }
 
 // Response is one control result. Code is present only for a successful pair.
@@ -46,13 +47,14 @@ type Response struct {
 	Code    string            `json:"code,omitempty"`
 	Agent   string            `json:"agent,omitempty"`
 	Expires time.Time         `json:"expires_at,omitempty"`
+	Relay   string            `json:"relay,omitempty"`
 	Keys    []authkeys.Record `json:"keys,omitempty"`
 	Removed int               `json:"removed,omitempty"`
 }
 
 // Handler implements pair and unpair against the running agent.
 type Handler interface {
-	Pair(ctx context.Context, ttl time.Duration) (code, agent string, expires time.Time, err error)
+	Pair(ctx context.Context, ttl time.Duration, sshUser string) (code, agent string, expires time.Time, err error)
 	List(ctx context.Context) ([]authkeys.Record, error)
 	Revoke(ctx context.Context, label string) (int, error)
 }
@@ -113,12 +115,12 @@ func serve(ctx context.Context, ln net.Listener, token string, h Handler, done c
 			}
 			switch req.Op {
 			case "pair":
-				code, agent, exp, err := h.Pair(ctx, time.Duration(req.TTLSeconds)*time.Second)
+				code, agent, exp, err := h.Pair(ctx, time.Duration(req.TTLSeconds)*time.Second, req.SSHUser)
 				if err != nil {
 					writeResp(c, Response{Error: err.Error()})
 					return
 				}
-				writeResp(c, Response{OK: true, Code: code, Agent: agent, Expires: exp})
+				writeResp(c, Response{OK: true, Code: code, Agent: agent, Expires: exp, Relay: clientRelay(h)})
 			case "list":
 				keys, err := h.List(ctx)
 				if err != nil {
@@ -138,6 +140,14 @@ func serve(ctx context.Context, ln net.Listener, token string, h Handler, done c
 			}
 		}(conn)
 	}
+}
+
+func clientRelay(h Handler) string {
+	type reporter interface{ ClientURL() string }
+	if r, ok := h.(reporter); ok {
+		return strings.TrimSpace(r.ClientURL())
+	}
+	return ""
 }
 
 func writeResp(c net.Conn, resp Response) {
@@ -266,6 +276,12 @@ func CandidatePaths(configFlag, serviceName string) []string {
 	if configFlag != "" {
 		add(filepath.Join(filepath.Dir(configFlag), "agent-control.json"))
 	}
+	if runtime.GOOS != "windows" {
+		name := strings.TrimSpace(serviceName)
+		if name != "" && !strings.EqualFold(name, "kite-agent") {
+			add(UnixControlPath(name))
+		}
+	}
 	if runtime.GOOS == "windows" {
 		root := strings.TrimSpace(os.Getenv("ProgramData"))
 		if root == "" {
@@ -281,9 +297,22 @@ func CandidatePaths(configFlag, serviceName string) []string {
 		add(filepath.Join(dir, "kite", "agent-control.json"))
 	}
 	if runtime.GOOS != "windows" {
+		add(UnixControlPath(serviceName))
+		// Older builds kept this next to the relay state dir.
 		add("/var/lib/kite/agent-control.json")
 	}
 	return out
+}
+
+// UnixControlPath is the root agent's control file. It is not under the
+// relay's /var/lib/kite state directory.
+func UnixControlPath(serviceName string) string {
+	dir := "/var/lib/kite-agent"
+	name := strings.TrimSpace(serviceName)
+	if name != "" && !strings.EqualFold(name, "kite-agent") {
+		dir = filepath.Join(dir, name)
+	}
+	return filepath.Join(dir, "agent-control.json")
 }
 
 func same(a, b string) bool {
