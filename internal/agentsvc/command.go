@@ -344,6 +344,74 @@ func StatusHealthPaths(serviceName, configPath string) []string {
 	return []string{path}
 }
 
+// controlHelp is the text for one service-control subcommand. Each command
+// describes itself. status is the only one that prints local SSH health.
+func controlHelp(command string) string {
+	return controlHelpFor(command, runtime.GOOS)
+}
+
+func controlHelpFor(command, goos string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Usage: kite-agent %s [--service-name name]", command)
+	if command == "status" {
+		b.WriteString(" [--config path]")
+	}
+	b.WriteString("\n\n")
+	switch command {
+	case "status":
+		if goos == "windows" {
+			b.WriteString("status shows the Windows service state and this instance's local SSH health.\n")
+			b.WriteString("--config selects that instance's files when the path is the one install wrote.\n\n")
+		} else {
+			b.WriteString("status shows this instance's local SSH health. --config /etc/kite/<name>/agent.env\n")
+			b.WriteString("selects that instance, not the default. Health is stored in\n")
+			b.WriteString("/var/lib/kite-agent or /var/lib/kite-agent/<name>.\n\n")
+		}
+	case "start", "stop", "restart", "uninstall":
+		writeControlAction(&b, command, goos)
+	default:
+		fmt.Fprintf(&b, "%s acts on one instance.\n\n", command)
+	}
+	return b.String()
+}
+
+func writeControlAction(b *strings.Builder, command, goos string) {
+	switch goos {
+	case "windows":
+		fmt.Fprintf(b, "%s the Windows service for this instance. --service-name selects\n", command)
+		b.WriteString("kite-agent or a side-by-side instance and does not touch the others.\n\n")
+	case "darwin":
+		fmt.Fprintf(b, "%s this instance with launchctl. The default label is com.kite.agent;\n", command)
+		b.WriteString("a named instance is com.kite.<name>.\n")
+		switch command {
+		case "start":
+			b.WriteString("  sudo launchctl bootstrap system /Library/LaunchDaemons/com.kite.agent.plist\n")
+		case "stop":
+			b.WriteString("  sudo launchctl bootout system/com.kite.agent\n")
+		case "restart":
+			b.WriteString("  sudo launchctl kickstart -k system/com.kite.agent\n")
+		default:
+			b.WriteString("  sudo launchctl bootout system/com.kite.agent\n")
+			b.WriteString("  sudo rm /Library/LaunchDaemons/com.kite.agent.plist\n")
+		}
+		fmt.Fprintf(b, "kite-agent %s controls the service when run on Windows.\n\n", command)
+	default:
+		fmt.Fprintf(b, "%s this instance with systemctl. The default unit is kite-agent.\n", command)
+		switch command {
+		case "uninstall":
+			b.WriteString("  sudo systemctl disable --now kite-agent\n")
+			b.WriteString("  sudo rm /etc/systemd/system/kite-agent.service\n")
+			b.WriteString("A named instance uses /etc/systemd/system/<name>.service,\n")
+			b.WriteString("/usr/local/lib/kite/<name>/kite-agent, /etc/kite/<name>/agent.env,\n")
+			b.WriteString("and /var/lib/kite-agent/<name>.\n")
+		default:
+			fmt.Fprintf(b, "  sudo systemctl %s kite-agent\n", command)
+			fmt.Fprintf(b, "  sudo systemctl %s <service-name>\n", command)
+		}
+		fmt.Fprintf(b, "kite-agent %s controls the service when run on Windows.\n\n", command)
+	}
+}
+
 // ParseControl reads --service-name for status, start, stop, restart, and uninstall.
 func ParseControl(command string, args []string) (string, error) {
 	name, _, err := ParseControlOptions(command, args)
@@ -358,18 +426,9 @@ func ParseControlOptions(command string, args []string) (name, configPath string
 	var serviceName string
 	configPath = config.PeekConfigFlag(args)
 	fs.StringVar(&serviceName, "service-name", "", "instance to act on (default kite-agent)")
-	fs.StringVar(&configPath, "config", configPath, "config file for this instance (health is stored beside it)")
+	fs.StringVar(&configPath, "config", configPath, "instance config path; status uses it to find local SSH health")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: kite-agent %s [--service-name name] [--config path]\n\n", command)
-		if runtime.GOOS == "windows" {
-			fmt.Fprintf(fs.Output(), "Acts on one Windows service. --config selects that instance's files\n")
-			fmt.Fprintf(fs.Output(), "when the path is the one install wrote for it.\n\n")
-		} else {
-			fmt.Fprintf(fs.Output(), "Shows that instance's local SSH health. --config /etc/kite/<name>/agent.env\n")
-			fmt.Fprintf(fs.Output(), "selects that instance, not the default. Health is stored in\n")
-			fmt.Fprintf(fs.Output(), "/var/lib/kite-agent or /var/lib/kite-agent/<name>.\n")
-			fmt.Fprintf(fs.Output(), "Start and stop use systemctl on Linux or launchctl on macOS.\n\n")
-		}
+		fmt.Fprint(fs.Output(), controlHelp(command))
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -382,15 +441,54 @@ func ParseControlOptions(command string, args []string) (name, configPath string
 	return name, configPath, err
 }
 
+func listHelp(goos string) string {
+	var b strings.Builder
+	b.WriteString("Usage: kite-agent list\n\n")
+	switch goos {
+	case "windows":
+		b.WriteString("list prints Windows services named kite-agent and kite-agent-*.\n")
+		b.WriteString("No elevation is required. Each line is tab-separated:\n")
+		b.WriteString("service name, agent name, state, start type.\n\n")
+	case "darwin":
+		b.WriteString("list enumerates installed instances. On macOS, launchctl print system\n")
+		b.WriteString("shows com.kite.agent and com.kite.<name>. kite-agent list itself\n")
+		b.WriteString("enumerates Windows services.\n\n")
+	default:
+		b.WriteString("list enumerates installed instances. On Linux:\n")
+		b.WriteString("  systemctl list-units 'kite-agent*'\n")
+		b.WriteString("kite-agent list itself enumerates Windows services.\n\n")
+	}
+	return b.String()
+}
+
+func upgradeHelp(goos string) string {
+	var b strings.Builder
+	b.WriteString("Usage: kite-agent upgrade --from <new-binary> [--service-name name]\n\n")
+	switch goos {
+	case "windows":
+		b.WriteString("upgrade schedules a one-shot SYSTEM task that stops the service, copies the new\n")
+		b.WriteString("executable over the installed one, and starts the service. The task keeps\n")
+		b.WriteString("running if the SSH session that launched the upgrade is disconnected.\n\n")
+	case "darwin":
+		b.WriteString("upgrade replaces one instance's binary. On macOS the default is\n")
+		b.WriteString("/usr/local/bin/kite-agent and a named instance is /usr/local/lib/kite/<name>/kite-agent.\n")
+		b.WriteString("Copy the new binary over that path and restart the launchd job.\n")
+		b.WriteString("The scheduled-task upgrade runs on Windows.\n\n")
+	default:
+		b.WriteString("upgrade replaces one instance's binary. On Linux the default is\n")
+		b.WriteString("/usr/local/bin/kite-agent and a named instance is /usr/local/lib/kite/<name>/kite-agent.\n")
+		b.WriteString("Copy the new binary over that path and restart the systemd unit.\n")
+		b.WriteString("The scheduled-task upgrade runs on Windows.\n\n")
+	}
+	return b.String()
+}
+
 // ParseList accepts kite-agent list with no arguments.
 func ParseList(args []string) error {
 	fs := flag.NewFlagSet("kite-agent list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: kite-agent list\n\n")
-		fmt.Fprintf(fs.Output(), "Lists Windows services named kite-agent and kite-agent-*.\n")
-		fmt.Fprintf(fs.Output(), "No elevation is required. Each line is tab-separated:\n")
-		fmt.Fprintf(fs.Output(), "service name, agent name, state, start type.\n\n")
+		fmt.Fprint(fs.Output(), listHelp(runtime.GOOS))
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -487,13 +585,10 @@ func ParseUpgrade(args []string) (UpgradeOptions, error) {
 	fs.SetOutput(os.Stderr)
 	var serviceName, from string
 	apply := fs.Bool("apply", false, "internal: perform the swap in this process (the scheduled task runs this)")
-	fs.StringVar(&serviceName, "service-name", "", "Windows service to upgrade (default kite-agent)")
-	fs.StringVar(&from, "from", "", "path to the new kite-agent.exe")
+	fs.StringVar(&serviceName, "service-name", "", "instance to upgrade (default kite-agent)")
+	fs.StringVar(&from, "from", "", "path to the new kite-agent binary")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: kite-agent upgrade --from <new-exe> [--service-name name]\n\n")
-		fmt.Fprintf(fs.Output(), "Schedules a one-shot SYSTEM task that stops the service, copies the new\n")
-		fmt.Fprintf(fs.Output(), "executable over the installed one, and starts the service. The task keeps\n")
-		fmt.Fprintf(fs.Output(), "running if the SSH session that launched the upgrade is disconnected.\n\n")
+		fmt.Fprint(fs.Output(), upgradeHelp(runtime.GOOS))
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

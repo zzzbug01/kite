@@ -563,9 +563,47 @@ func TestInstallHelpIsNotWindowsOnly(t *testing.T) {
 	if strings.Contains(text, "Acts on one Windows service") {
 		t.Fatal(text)
 	}
-	if !strings.Contains(text, "/etc/kite/<name>/agent.env") || !strings.Contains(text, "systemctl") {
+	if !strings.Contains(text, "status shows") || !strings.Contains(text, "/etc/kite/<name>/agent.env") {
 		t.Fatal(text)
 	}
+	if strings.Contains(text, "Uninstalls") || strings.Contains(text, "uninstall this instance") {
+		t.Fatal(text)
+	}
+}
+
+func TestControlHelpNamesItselfOnEachOS(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, cmd := range []string{"uninstall", "status", "start", "stop", "restart"} {
+			text := strings.ToLower(controlHelpFor(cmd, goos))
+			if !containsHelpWord(text, cmd) {
+				t.Fatalf("%s %s help:\n%s", goos, cmd, text)
+			}
+		}
+		uninstall := controlHelpFor("uninstall", goos)
+		if strings.Contains(uninstall, "local SSH health") {
+			t.Fatalf("%s uninstall help is the status text:\n%s", goos, uninstall)
+		}
+		if !strings.Contains(controlHelpFor("status", goos), "status shows") {
+			t.Fatal(goos)
+		}
+		if !containsHelpWord(strings.ToLower(listHelp(goos)), "list") {
+			t.Fatal(goos, listHelp(goos))
+		}
+		if !containsHelpWord(strings.ToLower(upgradeHelp(goos)), "upgrade") {
+			t.Fatal(goos, upgradeHelp(goos))
+		}
+	}
+}
+
+func containsHelpWord(s, word string) bool {
+	for _, field := range strings.FieldsFunc(s, func(r rune) bool {
+		return r < 'a' || r > 'z'
+	}) {
+		if field == word {
+			return true
+		}
+	}
+	return false
 }
 
 func TestParseControlServiceName(t *testing.T) {

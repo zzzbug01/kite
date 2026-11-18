@@ -28,7 +28,7 @@ func runSetup(args []string) error {
 	local := fs.String("local", "127.0.0.1:22", "local SSH address the agent dials (env LOCAL_SSH_ADDR)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: kite-agent setup [--local 127.0.0.1:22]\n\n")
-		fmt.Fprintf(fs.Output(), "Checks the local SSH server. When this process is root (or an elevated\n")
+		fmt.Fprintf(fs.Output(), "setup checks the local SSH server. When this process is root (or an elevated\n")
 		fmt.Fprintf(fs.Output(), "Windows prompt), a missing server is installed and sshd is set to start\n")
 		fmt.Fprintf(fs.Output(), "automatically. Otherwise the exact install command is printed.\n")
 		fmt.Fprintf(fs.Output(), "No firewall rule is added. kite-agent dials 127.0.0.1 only.\n\n")
@@ -64,10 +64,10 @@ func runPair(args []string) error {
 	ttl := fs.Duration("ttl", 10*time.Minute, "how long the pairing code stays valid")
 	var serviceName string
 	fs.StringVar(&configPath, "config", configPath, "agent config file (or KITE_CONFIG)")
-	fs.StringVar(&serviceName, "service-name", "", "Windows service instance whose control file to use")
+	fs.StringVar(&serviceName, "service-name", "", "instance whose control file to use (default kite-agent)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: kite-agent pair [--ttl 10m] [--service-name name]\n\n")
-		fmt.Fprintf(fs.Output(), "Asks the relay for a one-time pairing code and prints it.\n")
+		fmt.Fprintf(fs.Output(), "pair asks the relay for a one-time pairing code and prints it.\n")
 		fmt.Fprintf(fs.Output(), "The code is not the registration key. It expires and works once.\n")
 		fmt.Fprintf(fs.Output(), "On the computer you connect from: kite connect CODE\n\n")
 		fmt.Fprintf(fs.Output(), "pair talks to the running agent over 127.0.0.1 when the control\n")
@@ -160,11 +160,11 @@ func runUnpair(args []string) error {
 	revoke := fs.String("revoke", "", "remove keys tagged with this label")
 	var serviceName string
 	fs.StringVar(&configPath, "config", configPath, "agent config file (or KITE_CONFIG)")
-	fs.StringVar(&serviceName, "service-name", "", "Windows service instance whose control file to use")
+	fs.StringVar(&serviceName, "service-name", "", "instance whose control file to use (default kite-agent)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: kite-agent unpair --list\n")
 		fmt.Fprintf(fs.Output(), "       kite-agent unpair --revoke <label>\n\n")
-		fmt.Fprintf(fs.Output(), "Lists or removes authorized_keys lines that kite pair installed.\n")
+		fmt.Fprintf(fs.Output(), "unpair lists or removes authorized_keys lines that kite pair installed.\n")
 		fmt.Fprintf(fs.Output(), "This does not revoke the relay client token. On the relay also run:\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay tokens revoke <id-or-label>\n\n")
 		fs.PrintDefaults()
