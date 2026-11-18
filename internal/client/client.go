@@ -5,6 +5,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -37,6 +38,9 @@ type Config struct {
 	Logger          *slog.Logger
 	// HTTPClient overrides the handshake client. Production leaves it nil.
 	HTTPClient *http.Client
+	// Auth is "registration" (default) or "client". "client" means
+	// RegistrationKey holds a per-client token from `kite connect`.
+	Auth string
 }
 
 // Stream is one SSH session. Read and Write may be used concurrently.
@@ -89,11 +93,15 @@ func Dial(ctx context.Context, cfg Config) (*Stream, error) {
 	if err != nil {
 		return nil, err
 	}
-	hello, err := protocol.MarshalHello(protocol.Hello{
+	helloMsg := protocol.Hello{
 		Role:  "client",
 		Key:   cfg.RegistrationKey,
 		Agent: cfg.Agent,
-	})
+	}
+	if cfg.Auth == "client" {
+		helloMsg.Auth = "client"
+	}
+	hello, err := protocol.MarshalHello(helloMsg)
 	if err != nil {
 		ws.CloseNow()
 		return nil, err
@@ -120,7 +128,11 @@ func Dial(ctx context.Context, cfg Config) (*Stream, error) {
 		case protocol.TypePong:
 		case protocol.TypeHelloErr, protocol.TypeOpenErr:
 			ws.CloseNow()
-			return nil, mapReason(string(f.Payload))
+			err := mapReason(string(f.Payload))
+			if errors.Is(err, ErrUnauthorized) && cfg.Auth == "client" {
+				err = fmt.Errorf("%w; the relay rejected the client token (upgrade kite-relay, or run kite connect again if it was revoked)", err)
+			}
+			return nil, err
 		case protocol.TypeOpenOK:
 			if f.StreamID == 0 {
 				ws.CloseNow()

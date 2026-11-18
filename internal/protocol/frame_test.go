@@ -11,6 +11,9 @@ func TestPingPongTypes(t *testing.T) {
 	if TypePing != 10 || TypePong != 11 {
 		t.Fatalf("heartbeat types changed: ping=%d pong=%d", TypePing, TypePong)
 	}
+	if TypePairInstall != 12 || TypePairResult != 13 {
+		t.Fatalf("pair types changed: install=%d result=%d", TypePairInstall, TypePairResult)
+	}
 	if HeaderSize != 5 || MaxPayload != 256*1024 || MaxStreams != 64 {
 		t.Fatalf("frame limits changed: header=%d payload=%d streams=%d", HeaderSize, MaxPayload, MaxStreams)
 	}

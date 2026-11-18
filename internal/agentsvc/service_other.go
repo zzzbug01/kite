@@ -20,10 +20,7 @@ func Serve(string, func(context.Context) error) error {
 	return errWindowsOnly("service")
 }
 
-// Install registers the Windows service.
-func Install(Options) error {
-	return errWindowsOnly("install")
-}
+// Install is provided by install_host.go on this platform.
 
 // Uninstall removes the Windows service.
 func Uninstall(string) error {

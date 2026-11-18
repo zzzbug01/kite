@@ -5,7 +5,9 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/zzzbug01/kite/internal/auth"
+	"github.com/zzzbug01/kite/internal/pairing"
 	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/wsutil"
 )
@@ -25,18 +28,37 @@ const openTimeout = 15 * time.Second
 // Config controls a relay server.
 type Config struct {
 	RegistrationKey string
-	IdleTimeout     time.Duration
+	// PreviousKey is accepted in addition to RegistrationKey so an operator
+	// can rotate the agent secret without a flag day. Empty disables it.
+	PreviousKey string
+	// StateDir holds hashed per-client tokens. Empty uses pairing.DefaultStateDir.
+	StateDir    string
+	IdleTimeout time.Duration
 	// PingInterval defaults to 20s. Tests may shorten it.
 	PingInterval time.Duration
-	Logger       *slog.Logger
+	// PairTTL is the default pairing-code lifetime. Zero means 10 minutes.
+	PairTTL time.Duration
+	// TrustedProxies nil means loopback only. An empty non-nil slice trusts
+	// nobody. Otherwise these networks may supply X-Forwarded-For.
+	TrustedProxies []*net.IPNet
+	// HandshakeTimeout bounds the wait for the first hello on /agent and
+	// /client. Zero means 10s. IdleTimeout does not apply until auth succeeds.
+	HandshakeTimeout time.Duration
+	Logger           *slog.Logger
 }
 
 // Server is an HTTP server that speaks the kite protocol on /agent and /client.
 type Server struct {
 	key  string
+	prev string
 	idle time.Duration
 	ping time.Duration
 	log  *slog.Logger
+
+	tokens    *pairing.Store
+	broker    *pairing.Broker
+	trusted   []*net.IPNet
+	handshake time.Duration
 
 	mu     sync.Mutex
 	agents map[string]*agentConn
@@ -61,16 +83,27 @@ func New(cfg Config) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	handshake := cfg.HandshakeTimeout
+	if handshake <= 0 {
+		handshake = protocol.HandshakeTimeout
+	}
 	s := &Server{
-		key:    cfg.RegistrationKey,
-		idle:   idle,
-		ping:   ping,
-		log:    log,
-		agents: make(map[string]*agentConn),
+		key:       cfg.RegistrationKey,
+		prev:      cfg.PreviousKey,
+		idle:      idle,
+		ping:      ping,
+		log:       log,
+		tokens:    pairing.Open(cfg.StateDir),
+		broker:    pairing.NewBroker(pairing.Config{TTL: cfg.PairTTL}),
+		trusted:   cfg.TrustedProxies,
+		handshake: handshake,
+		agents:    make(map[string]*agentConn),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent", s.handleAgent)
 	mux.HandleFunc("/client", s.handleClient)
+	mux.HandleFunc("POST /pair", s.handlePairCreate)
+	mux.HandleFunc("POST /pair/redeem", s.handlePairRedeem)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -102,6 +135,9 @@ func (s *Server) HasAgent(name string) bool {
 // when the relay terminates TLS itself. The normal deployment is plain WS
 // behind nginx or Caddy.
 func (s *Server) Serve(ctx context.Context, ln net.Listener, certFile, keyFile string) error {
+	if err := s.tokens.Ensure(); err != nil {
+		return fmt.Errorf("STATE_DIR %s: %w", s.tokens.Dir(), err)
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	s.rootCtx = ctx
 	s.rootCancel = cancel
@@ -163,6 +199,9 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a := newAgentConn(s, hello.Name, ws, ctx, cancel)
+	for _, feature := range hello.Features {
+		a.features[feature] = true
+	}
 	s.register(a)
 	defer s.unregister(a)
 	defer a.close()
@@ -276,9 +315,30 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 // readHello reads the first frame and checks the registration key.
 // role is only used so a dummy compare still runs when the frame is unusable.
 func (s *Server) readHello(ctx context.Context, ws *websocket.Conn, _ string) (protocol.Hello, bool) {
-	timer := time.AfterFunc(10*time.Second, func() { ws.CloseNow() })
+	// The idle watcher starts only after a successful hello. Cancelling the
+	// read context closes the websocket in this library, which would drop the
+	// error frame, so the timer writes handshake timeout and then cancels.
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	finished := false
+	timer := time.AfterFunc(s.handshake, func() {
+		mu.Lock()
+		if finished {
+			mu.Unlock()
+			return
+		}
+		finished = true
+		mu.Unlock()
+		s.log.Info("handshake timeout", "limit", s.handshake.String())
+		s.reject(ctx, ws, protocol.ReasonHandshakeTimeout)
+		cancel()
+	})
 	defer timer.Stop()
-	f, err := wsutil.ReadFrame(ctx, ws)
+	f, err := wsutil.ReadFrame(hctx, ws)
+	mu.Lock()
+	finished = true
+	mu.Unlock()
 	if err != nil {
 		return protocol.Hello{}, false
 	}
@@ -294,14 +354,43 @@ func (s *Server) readHello(ctx context.Context, ws *websocket.Conn, _ string) (p
 		s.reject(ctx, ws, protocol.ReasonBadHello)
 		return protocol.Hello{}, false
 	}
-	if !auth.Equal(h.Key, s.key) {
-		s.reject(ctx, ws, protocol.ReasonUnauthorized)
+	if reason := s.authorize(&h); reason != "" {
+		s.reject(ctx, ws, reason)
 		return protocol.Hello{}, false
 	}
 	// Drop the secret before the value escapes this function's success path
-	// into logs. Callers only need role and name.
+	// into logs. Callers only need role, name, and features.
 	h.Key = ""
 	return h, true
+}
+
+// authorize checks a registration key or a per-client token. An empty Auth
+// field is the v0.1.0-rc.2 registration-key handshake.
+func (s *Server) authorize(h *protocol.Hello) string {
+	switch h.Auth {
+	case "", "registration":
+		if !s.registrationOK(h.Key) {
+			return protocol.ReasonUnauthorized
+		}
+	case "client":
+		if h.Role != "client" || !protocol.ValidName(h.Agent) {
+			return protocol.ReasonUnauthorized
+		}
+		if _, ok := s.tokens.Authenticate(h.Key, h.Agent); !ok {
+			return protocol.ReasonUnauthorized
+		}
+	default:
+		return "unsupported credential; this relay only accepts a registration key or a paired client token"
+	}
+	return ""
+}
+
+// registrationOK accepts the current key and, during rotation, the previous
+// key. Both compares always run. An empty previous key does not match.
+func (s *Server) registrationOK(got string) bool {
+	ok := auth.Equal(got, s.key) && s.key != ""
+	prevOK := auth.Equal(got, s.prev) && s.prev != ""
+	return ok || prevOK
 }
 
 func (s *Server) reject(ctx context.Context, ws *websocket.Conn, reason string) {
@@ -388,18 +477,24 @@ type agentConn struct {
 	nextID  uint32
 	closed  bool
 
+	features map[string]bool
+	pairMu   sync.Mutex
+	pairWait map[string]chan protocol.PairResult
+
 	lastRecv atomic.Int64
 }
 
 func newAgentConn(srv *Server, name string, ws *websocket.Conn, ctx context.Context, cancel context.CancelFunc) *agentConn {
 	return &agentConn{
-		srv:     srv,
-		name:    name,
-		ws:      ws,
-		ctx:     ctx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
-		streams: make(map[uint32]*stream),
+		srv:      srv,
+		name:     name,
+		ws:       ws,
+		ctx:      ctx,
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		streams:  make(map[uint32]*stream),
+		features: make(map[string]bool),
+		pairWait: make(map[string]chan protocol.PairResult),
 	}
 }
 
@@ -471,6 +566,11 @@ func (a *agentConn) readLoop() {
 		case protocol.TypePing:
 			_ = a.write(protocol.Frame{Type: protocol.TypePong})
 		case protocol.TypePong:
+		case protocol.TypePairResult:
+			var res protocol.PairResult
+			if json.Unmarshal(f.Payload, &res) == nil && res.RequestID != "" {
+				a.deliverPair(res)
+			}
 		case protocol.TypeOpenOK:
 			if st := a.get(f.StreamID); st != nil {
 				st.failOpen(nil)

@@ -17,6 +17,9 @@
 relay:
   listen_addr: "127.0.0.1:8080"
   registration_key: "CHANGE_ME"
+  # registration_key_previous: ""  # set only while rotating the agent key
+  # state_dir: "/var/lib/kite"     # hashed client tokens; do not commit clients.json
+  # trusted_proxies: ""            # empty: loopback only, right-most X-Forwarded-For. "none" ignores it
   # Leave both unset to serve plain WebSocket for nginx or Caddy.
   # tls_cert_file: ""
   # tls_key_file: ""
@@ -28,8 +31,16 @@ agent:
   name: "my-pc"
   local_ssh_addr: "127.0.0.1:22"
   idle_timeout: "90s"
+  # ssh_user: "me"   # account that receives keys from kite-agent pair
 
 client:
   relay_addr: "wss://tunnel.example.com/client"
+  # Legacy clients still send registration_key. `kite connect` writes a
+  # per-client token under agents instead, and the laptop can omit this.
   registration_key: "CHANGE_ME"
   idle_timeout: "90s"
+  # agents:
+  #   my-pc:
+  #     token: "issued-by-kite-connect"
+  #     user: "me"
+  #     identity_file: "/home/me/.ssh/kite_my-pc"

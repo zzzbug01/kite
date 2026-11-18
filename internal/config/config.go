@@ -8,6 +8,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/url"
@@ -36,11 +37,14 @@ type File struct {
 
 // RelaySection is the kite-relay portion of a config file.
 type RelaySection struct {
-	ListenAddr      string `yaml:"listen_addr"`
-	RegistrationKey string `yaml:"registration_key"`
-	TLSCertFile     string `yaml:"tls_cert_file"`
-	TLSKeyFile      string `yaml:"tls_key_file"`
-	IdleTimeout     string `yaml:"idle_timeout"`
+	ListenAddr              string `yaml:"listen_addr"`
+	RegistrationKey         string `yaml:"registration_key"`
+	RegistrationKeyPrevious string `yaml:"registration_key_previous"`
+	StateDir                string `yaml:"state_dir"`
+	TrustedProxies          string `yaml:"trusted_proxies"`
+	TLSCertFile             string `yaml:"tls_cert_file"`
+	TLSKeyFile              string `yaml:"tls_key_file"`
+	IdleTimeout             string `yaml:"idle_timeout"`
 }
 
 // AgentSection is the kite-agent portion of a config file.
@@ -49,23 +53,38 @@ type AgentSection struct {
 	RegistrationKey string `yaml:"registration_key"`
 	Name            string `yaml:"name"`
 	LocalSSHAddr    string `yaml:"local_ssh_addr"`
+	LocalSSHAuto    bool   `yaml:"local_ssh_addr_auto"`
 	IdleTimeout     string `yaml:"idle_timeout"`
+	SSHUser         string `yaml:"ssh_user"`
 }
 
 // ClientSection is the kite client portion of a config file.
+// ClientAgent is one paired laptop. Token is a per-client secret, not the
+// registration key.
+type ClientAgent struct {
+	Token        string `yaml:"token"`
+	User         string `yaml:"user,omitempty"`
+	IdentityFile string `yaml:"identity_file,omitempty"`
+	RelayAddr    string `yaml:"relay_addr,omitempty"`
+}
+
 type ClientSection struct {
-	RelayAddr       string `yaml:"relay_addr"`
-	RegistrationKey string `yaml:"registration_key"`
-	IdleTimeout     string `yaml:"idle_timeout"`
+	RelayAddr       string                 `yaml:"relay_addr"`
+	RegistrationKey string                 `yaml:"registration_key"`
+	IdleTimeout     string                 `yaml:"idle_timeout"`
+	Agents          map[string]ClientAgent `yaml:"agents,omitempty"`
 }
 
 // Relay is the resolved kite-relay configuration.
 type Relay struct {
-	ListenAddr      string
-	RegistrationKey string
-	TLSCertFile     string
-	TLSKeyFile      string
-	IdleTimeout     time.Duration
+	ListenAddr              string
+	RegistrationKey         string
+	RegistrationKeyPrevious string
+	StateDir                string
+	TrustedProxies          string
+	TLSCertFile             string
+	TLSKeyFile              string
+	IdleTimeout             time.Duration
 }
 
 // Agent is the resolved kite-agent configuration.
@@ -74,14 +93,25 @@ type Agent struct {
 	RegistrationKey string
 	Name            string
 	LocalSSHAddr    string
-	IdleTimeout     time.Duration
+	// LocalSSHAuto is true when kite chose LocalSSHAddr by inspecting sshd.
+	// An explicit --local, LOCAL_SSH_ADDR without LOCAL_SSH_ADDR_AUTO, or a
+	// config value without the auto flag clears it.
+	LocalSSHAuto  bool
+	LocalExplicit bool
+	IdleTimeout   time.Duration
+	SSHUser       string
 }
 
 // Client is the resolved kite client configuration.
 type Client struct {
 	RelayAddr       string
 	RegistrationKey string
-	IdleTimeout     time.Duration
+	// FileRelayAddr and FileRegistrationKey are the values from the config
+	// file before environment defaults are applied. A paired host uses these.
+	FileRelayAddr       string
+	FileRegistrationKey string
+	IdleTimeout         time.Duration
+	Agents              map[string]ClientAgent
 }
 
 // LoadRelay resolves relay settings. explicitPath, when non-empty, must exist.
@@ -91,11 +121,17 @@ func LoadRelay(explicitPath string) (Relay, error) {
 		return Relay{}, err
 	}
 	cfg := Relay{
-		ListenAddr:      "127.0.0.1:8080",
-		IdleTimeout:     protocol.DefaultIdleTimeout,
-		RegistrationKey: file.Relay.RegistrationKey,
-		TLSCertFile:     file.Relay.TLSCertFile,
-		TLSKeyFile:      file.Relay.TLSKeyFile,
+		ListenAddr:              "127.0.0.1:8080",
+		IdleTimeout:             protocol.DefaultIdleTimeout,
+		RegistrationKey:         file.Relay.RegistrationKey,
+		RegistrationKeyPrevious: file.Relay.RegistrationKeyPrevious,
+		StateDir:                file.Relay.StateDir,
+		TrustedProxies:          file.Relay.TrustedProxies,
+		TLSCertFile:             file.Relay.TLSCertFile,
+		TLSKeyFile:              file.Relay.TLSKeyFile,
+	}
+	if cfg.StateDir == "" {
+		cfg.StateDir = defaultStateDir()
 	}
 	if file.Relay.ListenAddr != "" {
 		cfg.ListenAddr = file.Relay.ListenAddr
@@ -110,6 +146,15 @@ func LoadRelay(explicitPath string) (Relay, error) {
 	}
 	if v := os.Getenv("REGISTRATION_KEY"); v != "" {
 		cfg.RegistrationKey = v
+	}
+	if v := os.Getenv("REGISTRATION_KEY_PREVIOUS"); v != "" {
+		cfg.RegistrationKeyPrevious = v
+	}
+	if v := os.Getenv("STATE_DIR"); v != "" {
+		cfg.StateDir = v
+	}
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		cfg.TrustedProxies = v
 	}
 	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
 		cfg.TLSCertFile = v
@@ -141,9 +186,15 @@ func LoadAgent(explicitPath string) (Agent, error) {
 		RelayAddr:       file.Agent.RelayAddr,
 		RegistrationKey: file.Agent.RegistrationKey,
 		Name:            file.Agent.Name,
+		SSHUser:         file.Agent.SSHUser,
 	}
 	if file.Agent.LocalSSHAddr != "" {
 		cfg.LocalSSHAddr = file.Agent.LocalSSHAddr
+		if file.Agent.LocalSSHAuto {
+			cfg.LocalSSHAuto = true
+		} else {
+			cfg.LocalExplicit = true
+		}
 	}
 	if d, err := parseDuration(file.Agent.IdleTimeout); err != nil {
 		return Agent{}, fmt.Errorf("agent.idle_timeout: %w", err)
@@ -161,6 +212,16 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	}
 	if v := os.Getenv("LOCAL_SSH_ADDR"); v != "" {
 		cfg.LocalSSHAddr = v
+		if envFlag(os.Getenv("LOCAL_SSH_ADDR_AUTO")) {
+			cfg.LocalSSHAuto = true
+			cfg.LocalExplicit = false
+		} else {
+			cfg.LocalSSHAuto = false
+			cfg.LocalExplicit = true
+		}
+	}
+	if v := os.Getenv("SSH_USER"); v != "" {
+		cfg.SSHUser = v
 	}
 	if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
 		d, err := parseDuration(v)
@@ -181,9 +242,12 @@ func LoadClient(explicitPath string) (Client, error) {
 		return Client{}, err
 	}
 	cfg := Client{
-		IdleTimeout:     protocol.DefaultIdleTimeout,
-		RelayAddr:       file.Client.RelayAddr,
-		RegistrationKey: file.Client.RegistrationKey,
+		IdleTimeout:         protocol.DefaultIdleTimeout,
+		RelayAddr:           file.Client.RelayAddr,
+		FileRelayAddr:       file.Client.RelayAddr,
+		RegistrationKey:     file.Client.RegistrationKey,
+		FileRegistrationKey: file.Client.RegistrationKey,
+		Agents:              file.Client.Agents,
 	}
 	if d, err := parseDuration(file.Client.IdleTimeout); err != nil {
 		return Client{}, fmt.Errorf("client.idle_timeout: %w", err)
@@ -206,6 +270,323 @@ func LoadClient(explicitPath string) (Client, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// CredentialFor returns the secret used to dial agent. A paired client token
+// wins over the shared registration key so a laptop can keep working after
+// the shared key is rotated.
+func (c Client) CredentialFor(agent string) (secret, kind string, err error) {
+	_, secret, kind, err = c.Endpoint(agent)
+	return secret, kind, err
+}
+
+// Endpoint is the relay URL and credential for one agent. A paired host
+// uses the relay address and token stored in the config file. Environment
+// variables only fill those in when the file has no host entry.
+func (c Client) Endpoint(agent string) (relay, secret, kind string, err error) {
+	if c.Agents != nil {
+		if a, ok := c.Agents[agent]; ok && strings.TrimSpace(a.Token) != "" {
+			relay = firstNonEmpty(a.RelayAddr, c.FileRelayAddr)
+			if relay == "" {
+				relay = c.RelayAddr
+			}
+			if relay == "" {
+				return "", "", "", fmt.Errorf("no relay address for %s; pass --relay or set it in the config file", agent)
+			}
+			return relay, a.Token, "client", nil
+		}
+	}
+	if strings.TrimSpace(c.RegistrationKey) != "" {
+		if strings.TrimSpace(c.RelayAddr) == "" {
+			return "", "", "", fmt.Errorf("no relay address for %s; set RELAY_ADDR or client.relay_addr", agent)
+		}
+		return c.RelayAddr, c.RegistrationKey, "registration", nil
+	}
+	return "", "", "", fmt.Errorf("no credential for %s; run kite connect or set REGISTRATION_KEY", agent)
+}
+
+// FileRelay reads the relay URL stored in a YAML config or an agent env file.
+// The process environment is ignored, so a hint printed for one instance is
+// not replaced by RELAY_ADDR from the shell that ran the command.
+func FileRelay(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	text := string(b)
+	var doc struct {
+		Agent struct {
+			RelayAddr string `yaml:"relay_addr"`
+		} `yaml:"agent"`
+	}
+	if yaml.Unmarshal(b, &doc) == nil {
+		if v := strings.TrimSpace(doc.Agent.RelayAddr); v != "" {
+			return v
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "RELAY_ADDR" {
+			continue
+		}
+		val = strings.TrimSpace(val)
+		val = strings.Trim(val, `"'`)
+		return val
+	}
+	return ""
+}
+
+func envFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// UpdateEnvLocalSSH rewrites LOCAL_SSH_ADDR in an agent env file and keeps
+// LOCAL_SSH_ADDR_AUTO=1 so a later start still follows sshd. A missing file
+// is left alone.
+func UpdateEnvLocalSSH(path, addr string) error {
+	addr = strings.TrimSpace(addr)
+	if strings.TrimSpace(path) == "" || addr == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	foundAddr := false
+	foundAuto := false
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "LOCAL_SSH_ADDR_AUTO=") {
+			lines[i] = "LOCAL_SSH_ADDR_AUTO=1"
+			foundAuto = true
+			continue
+		}
+		if strings.HasPrefix(trim, "LOCAL_SSH_ADDR=") {
+			lines[i] = "LOCAL_SSH_ADDR=" + addr
+			foundAddr = true
+		}
+	}
+	if !foundAddr {
+		lines = append(lines, "LOCAL_SSH_ADDR="+addr)
+	}
+	if !foundAuto {
+		lines = append(lines, "LOCAL_SSH_ADDR_AUTO=1")
+	}
+	body := strings.Join(lines, "\n")
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return writePrivate(path, []byte(body))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// SetSSHUser writes agent.ssh_user when it is empty or a machine account.
+// A real user already in the file is left unchanged.
+func SetSSHUser(path, sshUser string) error {
+	sshUser = strings.TrimSpace(sshUser)
+	if path == "" || sshUser == "" || strings.HasSuffix(sshUser, "$") {
+		return errors.New("ssh user is required")
+	}
+	root := map[string]any{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	agent, _ := root["agent"].(map[string]any)
+	if agent == nil {
+		agent = map[string]any{}
+	}
+	cur, _ := agent["ssh_user"].(string)
+	cur = strings.TrimSpace(cur)
+	if cur != "" && !strings.HasSuffix(cur, "$") && !strings.EqualFold(cur, "system") && !strings.EqualFold(cur, "localservice") && !strings.EqualFold(cur, "networkservice") {
+		return nil
+	}
+	agent["ssh_user"] = sshUser
+	root["agent"] = agent
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writePrivate(path, buf.Bytes())
+}
+
+// SetLocalSSH updates agent.local_ssh_addr in an existing file and records
+// whether kite chose the address. Other sections are preserved.
+func SetLocalSSH(path, addr string, auto bool) error {
+	if strings.TrimSpace(path) == "" || strings.TrimSpace(addr) == "" {
+		return errors.New("config path and address are required")
+	}
+	root := map[string]any{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	agent, _ := root["agent"].(map[string]any)
+	if agent == nil {
+		agent = map[string]any{}
+	}
+	agent["local_ssh_addr"] = addr
+	if auto {
+		agent["local_ssh_addr_auto"] = true
+	} else {
+		delete(agent, "local_ssh_addr_auto")
+	}
+	root["agent"] = agent
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writePrivate(path, buf.Bytes())
+}
+
+// ClientUpdate is one paired agent written into the client config section.
+type ClientUpdate struct {
+	RelayAddr    string
+	Agent        string
+	Token        string
+	User         string
+	IdentityFile string
+}
+
+// MergeClient writes or updates the client section of path. Other sections
+// are preserved. The file mode is 0600. The token is a per-client secret.
+func MergeClient(path string, upd ClientUpdate) error {
+	if strings.TrimSpace(upd.Agent) == "" || strings.TrimSpace(upd.Token) == "" {
+		return errors.New("client update requires an agent name and token")
+	}
+	root := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(b, &root); err != nil {
+			return fmt.Errorf("parse existing config %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	client, _ := root["client"].(map[string]any)
+	if client == nil {
+		client = map[string]any{}
+	}
+	if strings.TrimSpace(upd.RelayAddr) != "" {
+		client["relay_addr"] = upd.RelayAddr
+	}
+	agents, _ := client["agents"].(map[string]any)
+	if agents == nil {
+		agents = map[string]any{}
+	}
+	entry := map[string]any{"token": upd.Token}
+	if upd.RelayAddr != "" {
+		entry["relay_addr"] = upd.RelayAddr
+	}
+	if upd.User != "" {
+		entry["user"] = upd.User
+	}
+	if upd.IdentityFile != "" {
+		entry["identity_file"] = upd.IdentityFile
+	}
+	agents[upd.Agent] = entry
+	client["agents"] = agents
+	root["client"] = client
+	var buf bytes.Buffer
+	buf.WriteString("# kite client configuration. Contains a per-client token. Do not commit.\n")
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writePrivate(path, buf.Bytes())
+}
+
+func writePrivate(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	_ = os.Chmod(filepath.Dir(path), 0o700)
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(tmp)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			os.Remove(tmp)
+			return err2
+		}
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func defaultStateDir() string {
+	if runtime.GOOS == "windows" {
+		root := strings.TrimSpace(os.Getenv("ProgramData"))
+		if root == "" {
+			root = `C:\ProgramData`
+		}
+		return filepath.Join(root, "kite", "state")
+	}
+	return "/var/lib/kite"
 }
 
 // ValidateKey rejects an empty key and the published example placeholder.

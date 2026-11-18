@@ -9,14 +9,18 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/protocol"
+	"github.com/zzzbug01/kite/internal/sshheal"
 	"github.com/zzzbug01/kite/internal/wsutil"
 )
 
@@ -31,11 +35,90 @@ type Config struct {
 	Logger          *slog.Logger
 	// HTTPClient overrides the handshake client. Production leaves it nil.
 	HTTPClient *http.Client
+	// SSHUser is the account whose authorized_keys receives paired keys.
+	SSHUser string
+	// SSHAdmin forces the Windows administrators_authorized_keys path when
+	// non-nil. Nil detects membership of the Administrators group.
+	SSHAdmin *bool
+	// HomeDir overrides the home directory used for authorized_keys. Tests set it.
+	HomeDir string
+	// ProgramData overrides the Windows program data root. Empty uses the default.
+	ProgramData string
+	// EnableControl serves the loopback pair/unpair socket.
+	EnableControl bool
+	// ControlPath is the endpoint file. Empty uses the default next to the config.
+	ControlPath string
+	// ConfigPath is the agent config file, used to place the control file.
+	ConfigPath string
+	// LocalSSHAuto is true when LocalSSHAddr was chosen by detection.
+	// A failed dial may then follow a new sshd port.
+	LocalSSHAuto bool
+	// EnableHeal starts sshd and re-detects its port when a dial fails.
+	EnableHeal bool
+	// Heal overrides the production healer. Tests leave it nil.
+	Heal *sshheal.Healer
+	// Users is the live SSH account. pair updates it when a LocalSystem
+	// service was installed without ssh_user.
+	Users *SSHUsers
+	// ServiceName selects the state directory for a side-by-side instance.
+	ServiceName string
+}
+
+// SSHUsers is the account that should receive paired keys. It is shared by
+// the relay session and the local control server.
+type SSHUsers struct {
+	mu   sync.Mutex
+	name string
+}
+
+// Get returns the current SSH user.
+func (s *SSHUsers) Get() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.name
+}
+
+// Set records a non-machine SSH user.
+func (s *SSHUsers) Set(name string) {
+	if s == nil || IsMachineAccount(name) {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	s.mu.Lock()
+	s.name = name
+	s.mu.Unlock()
 }
 
 // Run dials the relay and reconnects with exponential backoff until ctx ends.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = cfg.normalized()
+	if cfg.Users == nil {
+		cfg.Users = &SSHUsers{}
+	}
+	if !IsMachineAccount(cfg.SSHUser) {
+		cfg.Users.Set(cfg.SSHUser)
+	}
+	if cfg.EnableHeal && cfg.Heal == nil {
+		h := sshheal.New(sshheal.OS{}, cfg.LocalSSHAddr, cfg.LocalSSHAuto, healthFile(cfg), cfg.ConfigPath, cfg.logger(), nil)
+		if runtime.GOOS != "windows" && privilegedUser() {
+			h.WithEnvFile(agentctl.UnixEnvFile(cfg.ServiceName))
+		}
+		cfg.Heal = h
+	}
+	if cfg.EnableControl {
+		stop, err := startControl(ctx, cfg)
+		if err != nil {
+			cfg.logger().Info("local pairing control disabled", "err", err)
+		} else {
+			defer stop()
+		}
+	}
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	log := cfg.logger()
@@ -104,9 +187,10 @@ func serve(ctx context.Context, ws *websocket.Conn, cfg Config) error {
 	cfg = cfg.normalized()
 	log := cfg.logger()
 	hello, err := protocol.MarshalHello(protocol.Hello{
-		Role: "agent",
-		Key:  cfg.RegistrationKey,
-		Name: cfg.Name,
+		Role:     "agent",
+		Key:      cfg.RegistrationKey,
+		Name:     cfg.Name,
+		Features: []string{protocol.FeaturePair},
 	})
 	if err != nil {
 		return err
@@ -168,6 +252,10 @@ func serve(ctx context.Context, ws *websocket.Conn, cfg Config) error {
 			sess.onEnd(f.StreamID)
 		case protocol.TypeClose:
 			sess.onClose(f.StreamID)
+		case protocol.TypePairInstall:
+			if f.StreamID == 0 {
+				sess.handlePair(f.Payload)
+			}
 		default:
 		}
 	}
@@ -238,8 +326,14 @@ func (s *session) onOpen(id uint32) {
 
 // dial connects to the configured local SSH address and only that address.
 func (s *session) dial(id uint32) {
-	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(s.ctx, "tcp", s.cfg.LocalSSHAddr)
+	addr := s.dialAddr()
+	conn, err := s.dialAddrOnce(addr)
+	if err != nil && s.cfg.Heal != nil {
+		if s.cfg.Heal.Recover(s.ctx, err) {
+			addr = s.dialAddr()
+			conn, err = s.dialAddrOnce(addr)
+		}
+	}
 	if err != nil {
 		s.drop(id)
 		_ = s.write(protocol.Frame{
@@ -247,8 +341,11 @@ func (s *session) dial(id uint32) {
 			StreamID: id,
 			Payload:  []byte(protocol.ReasonDialFailed),
 		})
-		s.cfg.logger().Info("dial local ssh failed", "addr", s.cfg.LocalSSHAddr, "err", err)
+		s.cfg.logger().Info("dial local ssh failed", "addr", addr, "err", err)
 		return
+	}
+	if s.cfg.Heal != nil {
+		s.cfg.Heal.MarkOK(addr)
 	}
 	if !s.attach(id, conn) {
 		conn.Close()
@@ -265,6 +362,20 @@ func (s *session) dial(id uint32) {
 		return
 	}
 	go s.readLocal(id, conn)
+}
+
+func (s *session) dialAddr() string {
+	if s.cfg.Heal != nil {
+		if addr := s.cfg.Heal.Addr(); addr != "" {
+			return addr
+		}
+	}
+	return s.cfg.LocalSSHAddr
+}
+
+func (s *session) dialAddrOnce(addr string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(s.ctx, "tcp", addr)
 }
 
 func (s *session) reserve(id uint32) bool {

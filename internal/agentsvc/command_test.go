@@ -271,8 +271,10 @@ func TestControlPlaneOffWindows(t *testing.T) {
 	if err != nil || in {
 		t.Fatalf("in=%v err=%v", in, err)
 	}
+	if err := Install(Options{}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "root") {
+		t.Fatalf("install: %v", err)
+	}
 	for name, err := range map[string]error{
-		"install":   Install(Options{}),
 		"uninstall": Uninstall(""),
 		"start":     Start(""),
 		"stop":      Stop(""),
@@ -487,6 +489,121 @@ func TestListUnsupportedOffWindows(t *testing.T) {
 	if !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "kite-agent-*") {
 		t.Fatal(err)
 	}
+}
+
+func TestStatusHealthFollowsConfigInstance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	got := StatusHealthPaths("kite-agent", "/etc/kite/kite-agent-test2/agent.env")
+	if len(got) != 1 || got[0] != "/var/lib/kite-agent/kite-agent-test2/ssh-health.json" {
+		t.Fatal(got)
+	}
+	custom := StatusHealthPaths("kite-agent", "/tmp/other/config.yaml")
+	if len(custom) != 1 || custom[0] != "/tmp/other/ssh-health.json" {
+		t.Fatal(custom)
+	}
+	named := StatusHealthPaths("kite-agent-test2", "")
+	if len(named) != 1 || named[0] != "/var/lib/kite-agent/kite-agent-test2/ssh-health.json" {
+		t.Fatal(named)
+	}
+}
+
+func TestInstallHelpIsNotWindowsOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	isolateConfigEnv(t)
+	t.Setenv("RELAY_ADDR", "ws://127.0.0.1:8080/agent")
+	t.Setenv("REGISTRATION_KEY", "test-key-value")
+	t.Setenv("AGENT_NAME", "my-pc")
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	_, parseErr := ParseOptions([]string{"-h"}, true)
+	w.Close()
+	os.Stderr = old
+	body, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) {
+		t.Fatal(parseErr)
+	}
+	text := string(body)
+	if strings.Contains(text, "Register the Windows service") {
+		t.Fatal(text)
+	}
+	for _, want := range []string{"/usr/local/bin/kite-agent", "/usr/local/lib/kite/<name>/kite-agent", "/var/lib/kite-agent/<name>", "LOCAL_SSH_ADDR_AUTO=1"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q\n%s", want, text)
+		}
+	}
+	r, w, err = os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	_, _, parseErr = ParseControlOptions("status", []string{"-h"})
+	w.Close()
+	os.Stderr = old
+	body, err = io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) {
+		t.Fatal(parseErr)
+	}
+	text = string(body)
+	if strings.Contains(text, "Acts on one Windows service") {
+		t.Fatal(text)
+	}
+	if !strings.Contains(text, "status shows") || !strings.Contains(text, "/etc/kite/<name>/agent.env") {
+		t.Fatal(text)
+	}
+	if strings.Contains(text, "Uninstalls") || strings.Contains(text, "uninstall this instance") {
+		t.Fatal(text)
+	}
+}
+
+func TestControlHelpNamesItselfOnEachOS(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, cmd := range []string{"uninstall", "status", "start", "stop", "restart"} {
+			text := strings.ToLower(controlHelpFor(cmd, goos))
+			if !containsHelpWord(text, cmd) {
+				t.Fatalf("%s %s help:\n%s", goos, cmd, text)
+			}
+		}
+		uninstall := controlHelpFor("uninstall", goos)
+		if strings.Contains(uninstall, "local SSH health") {
+			t.Fatalf("%s uninstall help is the status text:\n%s", goos, uninstall)
+		}
+		if !strings.Contains(controlHelpFor("status", goos), "status shows") {
+			t.Fatal(goos)
+		}
+		if !containsHelpWord(strings.ToLower(listHelp(goos)), "list") {
+			t.Fatal(goos, listHelp(goos))
+		}
+		if !containsHelpWord(strings.ToLower(upgradeHelp(goos)), "upgrade") {
+			t.Fatal(goos, upgradeHelp(goos))
+		}
+	}
+}
+
+func containsHelpWord(s, word string) bool {
+	for _, field := range strings.FieldsFunc(s, func(r rune) bool {
+		return r < 'a' || r > 'z'
+	}) {
+		if field == word {
+			return true
+		}
+	}
+	return false
 }
 
 func TestParseControlServiceName(t *testing.T) {

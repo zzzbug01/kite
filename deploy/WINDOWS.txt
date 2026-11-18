@@ -1,43 +1,78 @@
 kite on Windows
 ================
 
-kite-agent runs as a Windows service. It starts at boot, with or without a
-logged-on user, and it does not open a console window.
-
-From an elevated PowerShell (Run as administrator), in this directory:
+From an elevated PowerShell (Run as administrator), in this directory.
+Replace CHANGE_ME and tunnel.example.com before running. install refuses
+those placeholders.
 
     $env:RELAY_ADDR = "wss://tunnel.example.com/agent"
     $env:REGISTRATION_KEY = "CHANGE_ME"
     $env:AGENT_NAME = "my-pc"
+    $env:SSH_USER = "me"
     .\kite-agent.exe install
-    .\kite-agent.exe status
+    .\kite-agent.exe pair
 
-Replace CHANGE_ME and tunnel.example.com before running. install refuses
-those placeholders.
+install sets up the local OpenSSH Server if it is missing
+(Add-WindowsCapability OpenSSH.Server~~~~0.0.1.0), sets the sshd service
+to Automatic, and starts it. It does not add a firewall rule. kite-agent
+dials 127.0.0.1:22 only. If sshd were left on Manual, a reboot would leave
+the tunnel up and 127.0.0.1:22 refused. install always sets Automatic.
+Re-running install is safe.
 
-The service reads %ProgramData%\kite\config.yaml unless you pass another
---config path outside your user profile. That file holds the registration
-key. Do not commit it. The service command line is only the executable and
---config. LocalSystem does not load your user environment or profile.
+If LOCAL_SSH_ADDR and --local are unset, install reads
+%ProgramData%\ssh\sshd_config and the port sshd is listening on, then
+saves that as local_ssh_addr with local_ssh_addr_auto. An address you set
+is kept. If a later dial fails, the service starts sshd (and sets
+Automatic) at most once every 30 seconds, and follows a new port when the
+saved address was auto. kite-agent status prints the last result.
+
+pair prints a one-time code such as ABCD-EFGH (10 minutes). It is not the
+registration key. The user who ran install can pair without another
+elevation prompt while the service is running. On the laptop:
+
+    kite connect --relay wss://tunnel.example.com ABCD-EFGH
+    ssh my-pc
+
+The code does not contain the relay address, so the laptop needs --relay
+once. kite connect keeps the private key on the laptop (~/.ssh/kite_my-pc,
+mode 0600) and sends only the public key. For an administrator, the agent
+writes C:\ProgramData\ssh\administrators_authorized_keys and tightens the
+ACL to SYSTEM and Administrators. Other accounts use that user's
+.ssh\authorized_keys. The comment is "kite-pair <label> <date>".
+Rewriting that file keeps its existing line endings. A LocalSystem
+service whose config has no ssh_user must not pair as the computer
+account (NAME$). Run kite-agent pair from the account you SSH as, or
+set ssh_user. install and upgrade fill ssh_user from the invoking user
+when it is missing or is a machine account. A failed pair does not
+consume the code.
+
+    kite-agent unpair --list
+    kite-agent unpair --revoke laptop
+
+The relay client token is separate. On the VPS: kite-relay tokens revoke <id>.
+
+The service starts at boot, with or without a logged-on user, and it does
+not open a console window. It reads %ProgramData%\kite\config.yaml unless
+you pass another --config path outside your user profile. The service
+command line is only the executable and --config. Do not commit the file.
 
     kite-agent status     (no elevation required)
     kite-agent list       (no elevation required; kite-agent and kite-agent-*)
-    kite-agent stop        (elevated)
-    kite-agent start       (elevated)
-    kite-agent restart     (elevated)
-    kite-agent uninstall   (elevated; leaves the config file in place)
+    kite-agent pair       (no elevation for the installing user while running)
+    kite-agent stop       (elevated)
+    kite-agent start      (elevated)
+    kite-agent restart    (elevated)
+    kite-agent uninstall  (elevated; leaves the config file in place)
 
 Logs: %ProgramData%\kite\kite-agent.log
 
-A second service can sit beside kite-agent. Use a different AGENT_NAME so
-the relay does not drop the tunnel you are using:
+A second service:
 
     .\kite-agent.exe install --service-name kite-agent-test
 
-Its files live under %ProgramFiles%\kite\kite-agent-test\ and
-%ProgramData%\kite\kite-agent-test\. status, start, stop, restart, and
-uninstall take the same --service-name. Only the default name removes an
-old logon task.
+Use a different AGENT_NAME. Its files are under
+%ProgramFiles%\kite\kite-agent-test\ and
+%ProgramData%\kite\kite-agent-test\.
 
 To replace a running exe even if this SSH session dies when the tunnel
 restarts:
@@ -45,37 +80,68 @@ restarts:
     .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
 
 That schedules a one-shot SYSTEM task and returns. The result is
-%ProgramData%\kite\upgrade.log (or %ProgramData%\kite\<service-name>\upgrade.log).
+%ProgramData%\kite\upgrade.log.
 
-install-kite-agent.ps1 in this zip calls the same install command. It does
-not register a logon scheduled task. Pass -ServiceName to install another
-instance.
+install-kite-agent.ps1 in this zip calls the same install command.
 
 Linux uses the systemd unit in the source repository (deploy/kite-agent.service).
-macOS uses deploy/com.kite.agent.plist. Neither file is in this zip.
+macOS uses deploy/com.kite.agent.plist, or sudo kite-agent install for a
+system LaunchDaemon. Neither file is in this zip.
 
 中文
 ====
 
-kite-agent 作为 Windows 服务运行。开机就会启动，不需要有人登录，也不会弹出
-控制台窗口。
-
-在本目录用提升权限的 PowerShell（以管理员身份运行）：
+在本目录用提升权限的 PowerShell（以管理员身份运行）。运行前换掉 CHANGE_ME
+和 tunnel.example.com。install 会拒绝这两个占位符。
 
     $env:RELAY_ADDR = "wss://tunnel.example.com/agent"
     $env:REGISTRATION_KEY = "CHANGE_ME"
     $env:AGENT_NAME = "my-pc"
+    $env:SSH_USER = "me"
     .\kite-agent.exe install
-    .\kite-agent.exe status
+    .\kite-agent.exe pair
 
-运行前换掉 CHANGE_ME 和 tunnel.example.com。install 会拒绝这两个占位符。
+install 会在缺少 OpenSSH Server 时安装它
+（Add-WindowsCapability OpenSSH.Server~~~~0.0.1.0），把 sshd 设为自动启动
+并启动。它不会添加防火墙规则。kite-agent 只拨 127.0.0.1:22。如果 sshd 停在
+手动启动，重启后隧道还在，但 127.0.0.1:22 会被拒绝。install 总会把它设成
+Automatic。再跑一次 install 是安全的。
 
-服务读取 %ProgramData%\kite\config.yaml，除非你用 --config 指向用户配置目录
-以外的路径。这个文件里有注册密钥，不要提交到 git。服务的命令行只有程序路径
-和 --config。LocalSystem 不会加载你的用户环境或配置目录。
+如果没有设置 LOCAL_SSH_ADDR 和 --local，install 会读
+%ProgramData%\ssh\sshd_config 以及 sshd 正在监听的端口，写入
+local_ssh_addr，并标上 local_ssh_addr_auto。你自己设的地址会保留。
+之后拨号失败时，服务最多每 30 秒启动一次 sshd（并设成 Automatic）；
+如果保存的地址是自动检测的，还会跟着新端口走。kite-agent status
+会打印最近一次结果。
+
+pair 打印一次性配对码，例如 ABCD-EFGH（10 分钟）。它不是注册密钥。执行
+install 的用户在服务运行时不需要再提权。在笔记本上：
+
+    kite connect --relay wss://tunnel.example.com ABCD-EFGH
+    ssh my-pc
+
+配对码里没有中继地址，所以笔记本第一次要带 --relay。kite connect 把私钥留在
+笔记本上（~/.ssh/kite_my-pc，权限 0600），只发送公钥。管理员账户会写到
+C:\ProgramData\ssh\administrators_authorized_keys，并把 ACL 收成只有 SYSTEM
+和管理员。其它账户使用该用户的 .ssh\authorized_keys。注释是
+「kite-pair <标签> <日期>」。重写这个文件时会保留原来的换行风格。
+以 LocalSystem 运行、配置里没有 ssh_user 的服务不能把计算机账户
+（NAME$）当成 SSH 用户。请用你要登录的账户执行 kite-agent pair，或写上
+ssh_user。install 和 upgrade 在 ssh_user 为空或是计算机账户时，会填上
+执行命令的用户。配对失败不会作废配对码。
+
+    kite-agent unpair --list
+    kite-agent unpair --revoke laptop
+
+中继上的客户端令牌是另一回事。在 VPS 上执行 kite-relay tokens revoke <id>。
+
+服务开机就会启动，不需要有人登录，也不会弹出控制台。它读取
+%ProgramData%\kite\config.yaml，除非你用 --config 指向用户目录以外的路径。
+服务命令行只有程序和 --config。不要把这个文件提交到 git。
 
     kite-agent status     （不需要提升权限）
     kite-agent list       （不需要提升权限；列出 kite-agent 和 kite-agent-*）
+    kite-agent pair       （服务在跑时，安装者不用再提权）
     kite-agent stop       （需要提升权限）
     kite-agent start      （需要提升权限）
     kite-agent restart    （需要提升权限）
@@ -83,27 +149,22 @@ kite-agent 作为 Windows 服务运行。开机就会启动，不需要有人登
 
 日志：%ProgramData%\kite\kite-agent.log
 
-可以在 kite-agent 旁边再装一个服务。请使用不同的 AGENT_NAME，避免中继踢掉
-你正在用的隧道：
+再装一个服务：
 
     .\kite-agent.exe install --service-name kite-agent-test
 
-它的文件在 %ProgramFiles%\kite\kite-agent-test\ 和
-%ProgramData%\kite\kite-agent-test\。status、start、stop、restart、uninstall
-都要带同一个 --service-name。只有默认名称会删除旧的登录计划任务。
-list 如果发现旧的登录任务 kite-agent 还在，会多打一行只读说明。
+请使用不同的 AGENT_NAME。文件在 %ProgramFiles%\kite\kite-agent-test\ 和
+%ProgramData%\kite\kite-agent-test\。
 
 即使这条 SSH 会话会在隧道重启时断开，也可以替换正在运行的程序：
 
     .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
-    .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe --service-name kite-agent-test
 
-upgrade 注册一个以 SYSTEM 运行的一次性任务后就返回。任务会停掉服务、覆盖
-exe、再启动服务。结果写在 %ProgramData%\kite\upgrade.log，其它实例写在
-%ProgramData%\kite\<service-name>\upgrade.log。
+upgrade 注册一个以 SYSTEM 运行的一次性任务后就返回。结果写在
+%ProgramData%\kite\upgrade.log。
 
-本压缩包里的 install-kite-agent.ps1 调用同一条 install 命令。它不会注册登录
-计划任务。用 -ServiceName 安装另一个实例。
+本压缩包里的 install-kite-agent.ps1 调用同一条 install 命令。
 
-Linux 的 systemd 单元和 macOS 的 plist 在源码仓库的 deploy\ 目录里，不在
-这个压缩包中。
+Linux 的 systemd 单元和 macOS 的 plist 在源码仓库的 deploy\ 目录里。macOS
+也可以用 sudo kite-agent install 安装系统 LaunchDaemon。这些文件不在这个
+压缩包中。
