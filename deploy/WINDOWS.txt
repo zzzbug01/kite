@@ -21,6 +21,7 @@ key. Do not commit it. The service command line is only the executable and
 --config. LocalSystem does not load your user environment or profile.
 
     kite-agent status     (no elevation required)
+    kite-agent list       (no elevation required; kite-agent and kite-agent-*)
     kite-agent stop        (elevated)
     kite-agent start       (elevated)
     kite-agent restart     (elevated)

@@ -85,6 +85,19 @@ func run(args []string) error {
 		}
 		fmt.Fprint(os.Stdout, text)
 		return nil
+	case agentsvc.CmdList:
+		if err := agentsvc.ParseList(rest); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		}
+		text, err := agentsvc.List()
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(os.Stdout, text)
+		return nil
 	case agentsvc.CmdUpgrade:
 		opt, err := agentsvc.ParseUpgrade(rest)
 		if errors.Is(err, flag.ErrHelp) {
@@ -120,6 +133,11 @@ func help(args []string) error {
 				return nil
 			}
 			return err
+		case "list":
+			if err := agentsvc.ParseList([]string{"-h"}); err != nil && !errors.Is(err, flag.ErrHelp) {
+				return err
+			}
+			return nil
 		case "status", "start", "stop", "restart", "uninstall":
 			_, err := agentsvc.ParseControl(strings.ToLower(args[0]), []string{"-h"})
 			if errors.Is(err, flag.ErrHelp) {

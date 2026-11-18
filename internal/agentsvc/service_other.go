@@ -2,7 +2,11 @@
 
 package agentsvc
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"runtime"
+)
 
 // RunningAsService reports whether this process was started by the Windows
 // Service Control Manager. It is always false on other systems.
@@ -44,6 +48,11 @@ func Restart(string) error {
 // Status prints the Windows service state.
 func Status(string) (string, error) {
 	return "", errWindowsOnly("status")
+}
+
+// List enumerates Windows kite-agent services. It is not available here.
+func List() (string, error) {
+	return "", fmt.Errorf("kite-agent list is not supported on %s; it lists Windows services named kite-agent and kite-agent-*", runtime.GOOS)
 }
 
 // Upgrade schedules a detached Windows binary swap.

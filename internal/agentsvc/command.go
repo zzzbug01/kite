@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ const (
 	CmdStop      Command = "stop"
 	CmdRestart   Command = "restart"
 	CmdStatus    Command = "status"
+	CmdList      Command = "list"
 	CmdUpgrade   Command = "upgrade"
 	CmdHelp      Command = "help"
 )
@@ -78,7 +80,7 @@ func Split(args []string) (Command, []string, error) {
 		return CmdRun, nil, nil
 	}
 	switch strings.ToLower(args[0]) {
-	case "run", "install", "uninstall", "start", "stop", "restart", "status", "upgrade":
+	case "run", "install", "uninstall", "start", "stop", "restart", "status", "list", "upgrade":
 		return Command(strings.ToLower(args[0])), args[1:], nil
 	case "help", "-h", "--help":
 		return CmdHelp, args[1:], nil
@@ -101,6 +103,7 @@ func Usage() string {
   kite-agent stop
   kite-agent restart
   kite-agent status
+  kite-agent list
   kite-agent upgrade --from <new-exe>
 
 kite-agent dials a kite relay and forwards streams only to the local SSH
@@ -112,6 +115,7 @@ console window:
 
   kite-agent install
   kite-agent status
+  kite-agent list
   kite-agent stop
   kite-agent start
   kite-agent restart
@@ -126,7 +130,9 @@ status, start, stop, restart, uninstall, and upgrade accept the same flag
 and touch only that instance.
 
 install, start, stop, restart, uninstall, and upgrade need an elevated
-Administrator prompt. status does not. install writes the registration key
+Administrator prompt. status and list do not. list prints every service
+named kite-agent or kite-agent-*, one tab-separated line each: service
+name, agent name, state, start type. install writes the registration key
 to the instance config file and records only that path on the service
 command line. Environment variables and flags are saved into the file
 because the service account does not see your shell environment.
@@ -244,6 +250,87 @@ func ParseControl(command string, args []string) (string, error) {
 		return "", errors.New("unexpected arguments")
 	}
 	return CanonicalServiceName(serviceName)
+}
+
+// ParseList accepts kite-agent list with no arguments.
+func ParseList(args []string) error {
+	fs := flag.NewFlagSet("kite-agent list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: kite-agent list\n\n")
+		fmt.Fprintf(fs.Output(), "Lists Windows services named kite-agent and kite-agent-*.\n")
+		fmt.Fprintf(fs.Output(), "No elevation is required. Each line is tab-separated:\n")
+		fmt.Fprintf(fs.Output(), "service name, agent name, state, start type.\n\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected arguments")
+	}
+	return nil
+}
+
+// ListedService is one installed kite-agent Windows service.
+type ListedService struct {
+	Name      string
+	AgentName string
+	State     string
+	StartType string
+}
+
+// IsKiteAgentService reports whether name is the default service or a
+// side-by-side instance (kite-agent-*).
+func IsKiteAgentService(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name == ServiceName || strings.HasPrefix(name, ServiceName+"-")
+}
+
+// FormatList renders list rows. Columns are tab-separated so a start type
+// such as "automatic (delayed)" stays one field. The registration key is
+// not included.
+func FormatList(rows []ListedService) string {
+	if len(rows) == 0 {
+		return "No kite-agent services are installed.\n"
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return strings.ToLower(rows[i].Name) < strings.ToLower(rows[j].Name)
+	})
+	var b strings.Builder
+	fmt.Fprintf(&b, "SERVICE\tAGENT\tSTATE\tSTART\n")
+	for _, row := range rows {
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", row.Name, listField(row.AgentName), listField(row.State), listField(row.StartType))
+	}
+	return b.String()
+}
+
+func listField(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// agentNameFromConfig reads agent.name and nothing else. A missing or
+// unreadable file yields "-" so list still prints the service.
+func agentNameFromConfig(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "-"
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "-"
+	}
+	var doc struct {
+		Agent struct {
+			Name string `yaml:"name"`
+		} `yaml:"agent"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil || strings.TrimSpace(doc.Agent.Name) == "" {
+		return "-"
+	}
+	return doc.Agent.Name
 }
 
 // ParseUpgrade reads upgrade flags. --apply is the worker a scheduled task runs.

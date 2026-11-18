@@ -46,7 +46,7 @@ func TestSplit(t *testing.T) {
 
 func TestUsageMentionsServiceNotScheduledTask(t *testing.T) {
 	text := Usage()
-	for _, want := range []string{"kite-agent status", "kite-agent install", "--service-name", "kite-agent upgrade", `%ProgramData%\kite\config.yaml`, "console window"} {
+	for _, want := range []string{"kite-agent status", "kite-agent list", "kite-agent install", "--service-name", "kite-agent upgrade", `%ProgramData%\kite\config.yaml`, "console window"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("usage missing %q", want)
 		}
@@ -404,6 +404,59 @@ func TestUpgradeCommand(t *testing.T) {
 	}
 	if UpgradeResultFile(lay) != filepath.Join(`C:\ProgramData`, "kite", "upgrade.log") {
 		t.Fatal(UpgradeResultFile(lay))
+	}
+}
+
+func TestListFormatting(t *testing.T) {
+	if !IsKiteAgentService("kite-agent") || !IsKiteAgentService("Kite-Agent-Test") {
+		t.Fatal("expected kite-agent names")
+	}
+	for _, name := range []string{"kite", "kite-agentfoo", "kite-upgrade-kite-agent", "sshd"} {
+		if IsKiteAgentService(name) {
+			t.Fatalf("should not list %s", name)
+		}
+	}
+	got := FormatList(nil)
+	if got != "No kite-agent services are installed.\n" {
+		t.Fatal(got)
+	}
+	got = FormatList([]ListedService{
+		{Name: "kite-agent-test", AgentName: "my-pc-test", State: "stopped", StartType: "automatic (delayed)"},
+		{Name: "kite-agent", AgentName: "my-pc", State: "running", StartType: "automatic (delayed)"},
+	})
+	want := "SERVICE\tAGENT\tSTATE\tSTART\n" +
+		"kite-agent\tmy-pc\trunning\tautomatic (delayed)\n" +
+		"kite-agent-test\tmy-pc-test\tstopped\tautomatic (delayed)\n"
+	if got != want {
+		t.Fatalf("%q", got)
+	}
+	if strings.Contains(got, "registration") {
+		t.Fatal(got)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := []byte("agent:\n  name: my-pc\n  registration_key: test-key-value\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if agentNameFromConfig(path) != "my-pc" {
+		t.Fatal(agentNameFromConfig(path))
+	}
+	if agentNameFromConfig(filepath.Join(dir, "missing.yaml")) != "-" {
+		t.Fatal("missing config")
+	}
+}
+
+func TestListUnsupportedOffWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("list is implemented on Windows")
+	}
+	text, err := List()
+	if err == nil || text != "" {
+		t.Fatalf("%q %v", text, err)
+	}
+	if !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "kite-agent-*") {
+		t.Fatal(err)
 	}
 }
 

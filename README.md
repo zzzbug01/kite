@@ -125,6 +125,7 @@ Replace both placeholders before running. `install` refuses `CHANGE_ME` and `tun
 
 ```powershell
 kite-agent status      # no elevation required
+kite-agent list        # no elevation required; every kite-agent and kite-agent-* service
 kite-agent stop         # elevated
 kite-agent start        # elevated
 kite-agent restart      # elevated
@@ -146,6 +147,8 @@ $env:AGENT_NAME = "my-pc-test"
 ```
 
 That instance is service `kite-agent-test`. Its exe is `%ProgramFiles%\kite\kite-agent-test\kite-agent.exe`, its config is `%ProgramData%\kite\kite-agent-test\config.yaml`, and its log is `%ProgramData%\kite\kite-agent-test\kite-agent.log`. `start`, `stop`, `restart`, and `uninstall` take the same `--service-name` and do not stop `kite-agent`.
+
+`kite-agent list` prints every installed service named `kite-agent` or `kite-agent-*`. It does not need elevation. Each line is tab-separated: service name, agent name from that instance's config, state (`running` or `stopped`), and start type. If the config file cannot be read, the agent name is `-`. The registration key is not printed. On Linux and macOS the command reports that listing Windows services is not supported.
 
 To replace the binary of a running instance without relying on the SSH session that came in through it:
 
@@ -366,6 +369,7 @@ $env:AGENT_NAME = "my-pc"
 
 ```powershell
 kite-agent status      # 不需要提升权限
+kite-agent list        # 不需要提升权限；列出 kite-agent 和 kite-agent-*
 kite-agent stop         # 需要提升权限
 kite-agent start        # 需要提升权限
 kite-agent restart      # 需要提升权限
@@ -387,6 +391,8 @@ $env:AGENT_NAME = "my-pc-test"
 ```
 
 这个实例的服务名是 `kite-agent-test`。程序在 `%ProgramFiles%\kite\kite-agent-test\kite-agent.exe`，配置在 `%ProgramData%\kite\kite-agent-test\config.yaml`，日志在 `%ProgramData%\kite\kite-agent-test\kite-agent.log`。`start`、`stop`、`restart`、`uninstall` 使用同一个 `--service-name`，不会停掉 `kite-agent`。
+
+`kite-agent list` 列出本机所有名为 `kite-agent` 或 `kite-agent-*` 的服务，不需要提升权限。每行用制表符分开：服务名、该实例配置里的 agent 名、状态（`running` 或 `stopped`）、启动类型。配置文件读不到时，agent 名是 `-`。不会打印注册密钥。在 Linux 和 macOS 上，这条命令会说明列出 Windows 服务不受支持。
 
 如果要在这条隧道上换掉正在提供隧道的那个程序，而 SSH 会话可能在服务重启时断开：
 
