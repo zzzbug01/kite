@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
@@ -180,13 +179,13 @@ func Revoke(path, label string, kind Kind, owner string) (int, error) {
 	if removed == 0 {
 		return 0, nil
 	}
-	if b.Len() == 0 {
-		if err := removeKeys(path); err != nil {
-			return 0, err
-		}
-		return removed, nil
+	// An empty authorized_keys file stays in place. Deleting it would drop
+	// the ACL and, on Windows, let a later create inherit a looser DACL.
+	body := []byte{}
+	if b.Len() > 0 {
+		body = []byte(b.String())
 	}
-	if err := writeKeys(path, []byte(b.String()), kind, owner); err != nil {
+	if err := writeKeys(path, body, kind, owner); err != nil {
 		return 0, err
 	}
 	return removed, nil
@@ -234,34 +233,18 @@ func writeKeys(path string, body []byte, kind Kind, owner string) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := replaceFile(tmp, path); err != nil {
+	// ACL (or ownership) is applied to the temp inode before the rename, so
+	// the destination is never missing and never briefly inherits a looser
+	// DACL. os.Rename replaces an existing file, including on Windows.
+	if err := finalize(tmp, kind, owner); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Chmod(path, 0o600); err != nil && kind == KindPOSIX {
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	return finalize(path, kind, owner)
-}
-
-func replaceFile(tmp, dst string) error {
-	if runtime.GOOS == "windows" {
-		if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return os.Rename(tmp, dst)
-}
-
-func removeKeys(path string) error {
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink; refusing to follow it", path)
-	}
-	err := os.Remove(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
+	return nil
 }
 
 func parsePair(line string) (Record, bool) {

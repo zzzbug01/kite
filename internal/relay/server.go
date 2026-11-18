@@ -38,7 +38,13 @@ type Config struct {
 	PingInterval time.Duration
 	// PairTTL is the default pairing-code lifetime. Zero means 10 minutes.
 	PairTTL time.Duration
-	Logger  *slog.Logger
+	// TrustedProxies nil means loopback only. An empty non-nil slice trusts
+	// nobody. Otherwise these networks may supply X-Forwarded-For.
+	TrustedProxies []*net.IPNet
+	// HandshakeTimeout bounds the wait for the first hello on /agent and
+	// /client. Zero means 10s. IdleTimeout does not apply until auth succeeds.
+	HandshakeTimeout time.Duration
+	Logger           *slog.Logger
 }
 
 // Server is an HTTP server that speaks the kite protocol on /agent and /client.
@@ -49,8 +55,10 @@ type Server struct {
 	ping time.Duration
 	log  *slog.Logger
 
-	tokens *pairing.Store
-	broker *pairing.Broker
+	tokens    *pairing.Store
+	broker    *pairing.Broker
+	trusted   []*net.IPNet
+	handshake time.Duration
 
 	mu     sync.Mutex
 	agents map[string]*agentConn
@@ -75,15 +83,21 @@ func New(cfg Config) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
+	handshake := cfg.HandshakeTimeout
+	if handshake <= 0 {
+		handshake = protocol.HandshakeTimeout
+	}
 	s := &Server{
-		key:    cfg.RegistrationKey,
-		prev:   cfg.PreviousKey,
-		idle:   idle,
-		ping:   ping,
-		log:    log,
-		tokens: pairing.Open(cfg.StateDir),
-		broker: pairing.NewBroker(pairing.Config{TTL: cfg.PairTTL}),
-		agents: make(map[string]*agentConn),
+		key:       cfg.RegistrationKey,
+		prev:      cfg.PreviousKey,
+		idle:      idle,
+		ping:      ping,
+		log:       log,
+		tokens:    pairing.Open(cfg.StateDir),
+		broker:    pairing.NewBroker(pairing.Config{TTL: cfg.PairTTL}),
+		trusted:   cfg.TrustedProxies,
+		handshake: handshake,
+		agents:    make(map[string]*agentConn),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent", s.handleAgent)
@@ -301,9 +315,30 @@ func (s *Server) handleClient(w http.ResponseWriter, r *http.Request) {
 // readHello reads the first frame and checks the registration key.
 // role is only used so a dummy compare still runs when the frame is unusable.
 func (s *Server) readHello(ctx context.Context, ws *websocket.Conn, _ string) (protocol.Hello, bool) {
-	timer := time.AfterFunc(10*time.Second, func() { ws.CloseNow() })
+	// The idle watcher starts only after a successful hello. Cancelling the
+	// read context closes the websocket in this library, which would drop the
+	// error frame, so the timer writes handshake timeout and then cancels.
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	finished := false
+	timer := time.AfterFunc(s.handshake, func() {
+		mu.Lock()
+		if finished {
+			mu.Unlock()
+			return
+		}
+		finished = true
+		mu.Unlock()
+		s.log.Info("handshake timeout", "limit", s.handshake.String())
+		s.reject(ctx, ws, protocol.ReasonHandshakeTimeout)
+		cancel()
+	})
 	defer timer.Stop()
-	f, err := wsutil.ReadFrame(ctx, ws)
+	f, err := wsutil.ReadFrame(hctx, ws)
+	mu.Lock()
+	finished = true
+	mu.Unlock()
 	if err != nil {
 		return protocol.Hello{}, false
 	}

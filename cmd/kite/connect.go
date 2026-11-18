@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/zzzbug01/kite/internal/config"
@@ -63,6 +65,14 @@ func runConnect(args []string) error {
 	if exe, err = filepath.Abs(exe); err != nil {
 		return err
 	}
+	absConfig := configPath
+	if abs, err := filepath.Abs(configPath); err == nil {
+		absConfig = abs
+	}
+	proxyConfig := ""
+	if explicitConfig(args) && !samePath(absConfig, defaultClientConfig()) {
+		proxyConfig = absConfig
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	res, err := connect.Run(ctx, connect.Options{
@@ -72,6 +82,7 @@ func runConnect(args []string) error {
 		ConfigPath:    configPath,
 		SSHConfigPath: sshPath,
 		Executable:    exe,
+		ProxyConfig:   proxyConfig,
 		Now:           time.Now(),
 	})
 	if err != nil {
@@ -93,6 +104,22 @@ func runConnect(args []string) error {
 	}
 	fmt.Fprintf(os.Stdout, "\nTry:\n  ssh %s exit\n", res.Agent)
 	return nil
+}
+
+func explicitConfig(args []string) bool {
+	return config.PeekConfigFlag(args) != ""
+}
+
+func samePath(a, b string) bool {
+	aa, err1 := filepath.Abs(a)
+	bb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return a == b
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(aa, bb)
+	}
+	return aa == bb
 }
 
 func defaultClientConfig() string {

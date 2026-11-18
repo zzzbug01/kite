@@ -233,6 +233,10 @@ func ParseOptions(args []string, install bool) (Options, error) {
 		if f.Name == "registration-key" {
 			cfg.RegistrationKey = keyFlag
 		}
+		if f.Name == "local" {
+			cfg.LocalExplicit = true
+			cfg.LocalSSHAuto = false
+		}
 	})
 	cfg.IdleTimeout = *idle
 	canon, err := CanonicalServiceName(serviceName)
@@ -599,6 +603,9 @@ func WriteAgentFile(path string, agent config.Agent) error {
 		"name":             agent.Name,
 		"local_ssh_addr":   agent.LocalSSHAddr,
 		"idle_timeout":     formatDuration(agent.IdleTimeout),
+	}
+	if agent.LocalSSHAuto {
+		agentDoc["local_ssh_addr_auto"] = true
 	}
 	if strings.TrimSpace(agent.SSHUser) != "" {
 		agentDoc["ssh_user"] = agent.SSHUser

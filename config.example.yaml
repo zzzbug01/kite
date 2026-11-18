@@ -19,6 +19,7 @@ relay:
   registration_key: "CHANGE_ME"
   # registration_key_previous: ""  # set only while rotating the agent key
   # state_dir: "/var/lib/kite"     # hashed client tokens; do not commit clients.json
+  # trusted_proxies: ""            # empty: loopback only, right-most X-Forwarded-For. "none" ignores it
   # Leave both unset to serve plain WebSocket for nginx or Caddy.
   # tls_cert_file: ""
   # tls_key_file: ""

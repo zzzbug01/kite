@@ -90,6 +90,16 @@ func TestQuotesSpacedProxy(t *testing.T) {
 	if !strings.Contains(block, `ProxyCommand "C:/Program Files/kite/kite.exe" %n`) {
 		t.Fatal(block)
 	}
+	withCfg := Block(Host{
+		Alias:        "my-pc",
+		User:         "me",
+		IdentityFile: "/tmp/kite_my-pc",
+		ProxyCommand: "/usr/local/bin/kite",
+		ConfigFile:   "/tmp/kite/config.yaml",
+	})
+	if !strings.Contains(withCfg, "ProxyCommand /usr/local/bin/kite --config /tmp/kite/config.yaml %n") {
+		t.Fatal(withCfg)
+	}
 }
 
 func TestRejectsBadHost(t *testing.T) {

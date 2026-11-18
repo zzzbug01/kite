@@ -19,6 +19,13 @@ dials 127.0.0.1:22 only. If sshd were left on Manual, a reboot would leave
 the tunnel up and 127.0.0.1:22 refused. install always sets Automatic.
 Re-running install is safe.
 
+If LOCAL_SSH_ADDR and --local are unset, install reads
+%ProgramData%\ssh\sshd_config and the port sshd is listening on, then
+saves that as local_ssh_addr with local_ssh_addr_auto. An address you set
+is kept. If a later dial fails, the service starts sshd (and sets
+Automatic) at most once every 30 seconds, and follows a new port when the
+saved address was auto. kite-agent status prints the last result.
+
 pair prints a one-time code such as ABCD-EFGH (10 minutes). It is not the
 registration key. The user who ran install can pair without another
 elevation prompt while the service is running. On the laptop:
@@ -93,6 +100,13 @@ install 会在缺少 OpenSSH Server 时安装它
 并启动。它不会添加防火墙规则。kite-agent 只拨 127.0.0.1:22。如果 sshd 停在
 手动启动，重启后隧道还在，但 127.0.0.1:22 会被拒绝。install 总会把它设成
 Automatic。再跑一次 install 是安全的。
+
+如果没有设置 LOCAL_SSH_ADDR 和 --local，install 会读
+%ProgramData%\ssh\sshd_config 以及 sshd 正在监听的端口，写入
+local_ssh_addr，并标上 local_ssh_addr_auto。你自己设的地址会保留。
+之后拨号失败时，服务最多每 30 秒启动一次 sshd（并设成 Automatic）；
+如果保存的地址是自动检测的，还会跟着新端口走。kite-agent status
+会打印最近一次结果。
 
 pair 打印一次性配对码，例如 ABCD-EFGH（10 分钟）。它不是注册密钥。执行
 install 的用户在服务运行时不需要再提权。在笔记本上：

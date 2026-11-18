@@ -25,7 +25,10 @@ type Options struct {
 	SSHConfigPath string
 	Executable    string
 	IdentityDir   string // directory for ~/.ssh; default is the ssh config directory
-	Now           time.Time
+	// ProxyConfig is set when the client config is not the default path.
+	// It is passed to OpenSSH as `kite --config <path> %n`.
+	ProxyConfig string
+	Now         time.Time
 }
 
 // Result is what the command prints. The client token is not included; it
@@ -110,6 +113,7 @@ func Run(ctx context.Context, opt Options) (Result, error) {
 		User:         resp.SSHUser,
 		IdentityFile: ident,
 		ProxyCommand: opt.Executable,
+		ConfigFile:   opt.ProxyConfig,
 	}, now)
 	if err != nil {
 		return Result{}, fmt.Errorf("ssh config: %w (client credential is in %s)", err, opt.ConfigPath)

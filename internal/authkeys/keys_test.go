@@ -139,6 +139,27 @@ func TestUpsertListRevoke(t *testing.T) {
 	}
 }
 
+func TestRevokeLastKeyLeavesEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "authorized_keys")
+	key := sampleKey(t)
+	if err := Upsert(path, key, "kite-pair laptop 2026-11-18", KindPOSIX, ""); err != nil {
+		t.Fatal(err)
+	}
+	n, err := Revoke(path, "laptop", KindPOSIX, "")
+	if err != nil || n != 1 {
+		t.Fatalf("%d %v", n, err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal("empty authorized_keys should remain", err)
+	}
+	if st.Size() != 0 {
+		b, _ := os.ReadFile(path)
+		t.Fatalf("size %d body %q", st.Size(), b)
+	}
+}
+
 func TestRejectsSymlinkAndBadKey(t *testing.T) {
 	if _, err := ValidateEd25519("ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7 comment"); err == nil {
 		t.Fatal("rsa should be rejected")

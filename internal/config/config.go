@@ -41,6 +41,7 @@ type RelaySection struct {
 	RegistrationKey         string `yaml:"registration_key"`
 	RegistrationKeyPrevious string `yaml:"registration_key_previous"`
 	StateDir                string `yaml:"state_dir"`
+	TrustedProxies          string `yaml:"trusted_proxies"`
 	TLSCertFile             string `yaml:"tls_cert_file"`
 	TLSKeyFile              string `yaml:"tls_key_file"`
 	IdleTimeout             string `yaml:"idle_timeout"`
@@ -52,6 +53,7 @@ type AgentSection struct {
 	RegistrationKey string `yaml:"registration_key"`
 	Name            string `yaml:"name"`
 	LocalSSHAddr    string `yaml:"local_ssh_addr"`
+	LocalSSHAuto    bool   `yaml:"local_ssh_addr_auto"`
 	IdleTimeout     string `yaml:"idle_timeout"`
 	SSHUser         string `yaml:"ssh_user"`
 }
@@ -78,6 +80,7 @@ type Relay struct {
 	RegistrationKey         string
 	RegistrationKeyPrevious string
 	StateDir                string
+	TrustedProxies          string
 	TLSCertFile             string
 	TLSKeyFile              string
 	IdleTimeout             time.Duration
@@ -89,8 +92,13 @@ type Agent struct {
 	RegistrationKey string
 	Name            string
 	LocalSSHAddr    string
-	IdleTimeout     time.Duration
-	SSHUser         string
+	// LocalSSHAuto is true when kite chose LocalSSHAddr by inspecting sshd.
+	// An explicit --local, LOCAL_SSH_ADDR, or a config value without the
+	// auto flag clears it.
+	LocalSSHAuto  bool
+	LocalExplicit bool
+	IdleTimeout   time.Duration
+	SSHUser       string
 }
 
 // Client is the resolved kite client configuration.
@@ -113,6 +121,7 @@ func LoadRelay(explicitPath string) (Relay, error) {
 		RegistrationKey:         file.Relay.RegistrationKey,
 		RegistrationKeyPrevious: file.Relay.RegistrationKeyPrevious,
 		StateDir:                file.Relay.StateDir,
+		TrustedProxies:          file.Relay.TrustedProxies,
 		TLSCertFile:             file.Relay.TLSCertFile,
 		TLSKeyFile:              file.Relay.TLSKeyFile,
 	}
@@ -138,6 +147,9 @@ func LoadRelay(explicitPath string) (Relay, error) {
 	}
 	if v := os.Getenv("STATE_DIR"); v != "" {
 		cfg.StateDir = v
+	}
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		cfg.TrustedProxies = v
 	}
 	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
 		cfg.TLSCertFile = v
@@ -173,6 +185,11 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	}
 	if file.Agent.LocalSSHAddr != "" {
 		cfg.LocalSSHAddr = file.Agent.LocalSSHAddr
+		if file.Agent.LocalSSHAuto {
+			cfg.LocalSSHAuto = true
+		} else {
+			cfg.LocalExplicit = true
+		}
 	}
 	if d, err := parseDuration(file.Agent.IdleTimeout); err != nil {
 		return Agent{}, fmt.Errorf("agent.idle_timeout: %w", err)
@@ -190,6 +207,8 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	}
 	if v := os.Getenv("LOCAL_SSH_ADDR"); v != "" {
 		cfg.LocalSSHAddr = v
+		cfg.LocalSSHAuto = false
+		cfg.LocalExplicit = true
 	}
 	if v := os.Getenv("SSH_USER"); v != "" {
 		cfg.SSHUser = v
@@ -254,6 +273,46 @@ func (c Client) CredentialFor(agent string) (secret, kind string, err error) {
 		return c.RegistrationKey, "registration", nil
 	}
 	return "", "", fmt.Errorf("no credential for %s; run kite connect or set REGISTRATION_KEY", agent)
+}
+
+// SetLocalSSH updates agent.local_ssh_addr in an existing file and records
+// whether kite chose the address. Other sections are preserved.
+func SetLocalSSH(path, addr string, auto bool) error {
+	if strings.TrimSpace(path) == "" || strings.TrimSpace(addr) == "" {
+		return errors.New("config path and address are required")
+	}
+	root := map[string]any{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	agent, _ := root["agent"].(map[string]any)
+	if agent == nil {
+		agent = map[string]any{}
+	}
+	agent["local_ssh_addr"] = addr
+	if auto {
+		agent["local_ssh_addr_auto"] = true
+	} else {
+		delete(agent, "local_ssh_addr_auto")
+	}
+	root["agent"] = agent
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writePrivate(path, buf.Bytes())
 }
 
 // ClientUpdate is one paired agent written into the client config section.

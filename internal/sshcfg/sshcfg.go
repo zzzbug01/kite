@@ -15,6 +15,9 @@ type Host struct {
 	User         string
 	IdentityFile string
 	ProxyCommand string
+	// ConfigFile is an explicit kite config. When set, ProxyCommand passes
+	// --config so ssh can find a credential that is not in the default path.
+	ConfigFile string
 }
 
 // Result describes an ssh config edit.
@@ -113,8 +116,16 @@ func Block(host Host) string {
 	fmt.Fprintf(&b, "  User %s\n", host.User)
 	fmt.Fprintf(&b, "  IdentityFile %s\n", quote(slash(host.IdentityFile)))
 	b.WriteString("  IdentitiesOnly yes\n")
-	fmt.Fprintf(&b, "  ProxyCommand %s %%n\n", quote(slash(host.ProxyCommand)))
+	fmt.Fprintf(&b, "  ProxyCommand %s\n", proxyLine(host))
 	return b.String()
+}
+
+func proxyLine(host Host) string {
+	line := quote(slash(host.ProxyCommand))
+	if host.ConfigFile != "" {
+		line += " --config " + quote(slash(host.ConfigFile))
+	}
+	return line + " %n"
 }
 
 func validate(host Host) error {
@@ -129,6 +140,9 @@ func validate(host Host) error {
 	}
 	if host.ProxyCommand == "" || strings.ContainsAny(host.ProxyCommand, "\r\n\"") {
 		return fmt.Errorf("proxy command path is empty or contains a quote")
+	}
+	if strings.ContainsAny(host.ConfigFile, "\r\n\"") {
+		return fmt.Errorf("config path contains a quote or newline")
 	}
 	return nil
 }

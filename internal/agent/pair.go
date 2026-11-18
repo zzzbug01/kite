@@ -16,6 +16,7 @@ import (
 	"github.com/zzzbug01/kite/internal/authkeys"
 	"github.com/zzzbug01/kite/internal/pairing"
 	"github.com/zzzbug01/kite/internal/protocol"
+	"github.com/zzzbug01/kite/internal/sshheal"
 )
 
 func (s *session) handlePair(payload []byte) {
@@ -49,6 +50,23 @@ func (s *session) installAuthorizedKey(req protocol.PairInstall) protocol.PairRe
 	res.SSHUser = name
 	s.cfg.logger().Info("installed paired key", "user", name, "label", pairing.SanitizeLabel(req.Label))
 	return res
+}
+
+func healthFile(configPath string) string {
+	if p := sshheal.File(configPath); p != "" {
+		return p
+	}
+	paths := sshheal.Search()
+	if privilegedUser() && len(paths) > 0 {
+		return paths[0]
+	}
+	if len(paths) > 1 {
+		return paths[len(paths)-1]
+	}
+	if len(paths) > 0 {
+		return paths[0]
+	}
+	return "ssh-health.json"
 }
 
 func startControl(ctx context.Context, cfg Config) (func(), error) {

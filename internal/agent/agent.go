@@ -17,6 +17,7 @@ import (
 
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/protocol"
+	"github.com/zzzbug01/kite/internal/sshheal"
 	"github.com/zzzbug01/kite/internal/wsutil"
 )
 
@@ -46,11 +47,21 @@ type Config struct {
 	ControlPath string
 	// ConfigPath is the agent config file, used to place the control file.
 	ConfigPath string
+	// LocalSSHAuto is true when LocalSSHAddr was chosen by detection.
+	// A failed dial may then follow a new sshd port.
+	LocalSSHAuto bool
+	// EnableHeal starts sshd and re-detects its port when a dial fails.
+	EnableHeal bool
+	// Heal overrides the production healer. Tests leave it nil.
+	Heal *sshheal.Healer
 }
 
 // Run dials the relay and reconnects with exponential backoff until ctx ends.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = cfg.normalized()
+	if cfg.EnableHeal && cfg.Heal == nil {
+		cfg.Heal = sshheal.New(sshheal.OS{}, cfg.LocalSSHAddr, cfg.LocalSSHAuto, healthFile(cfg.ConfigPath), cfg.ConfigPath, cfg.logger(), nil)
+	}
 	if cfg.EnableControl {
 		stop, err := startControl(ctx, cfg)
 		if err != nil {
@@ -266,8 +277,14 @@ func (s *session) onOpen(id uint32) {
 
 // dial connects to the configured local SSH address and only that address.
 func (s *session) dial(id uint32) {
-	d := net.Dialer{Timeout: 10 * time.Second}
-	conn, err := d.DialContext(s.ctx, "tcp", s.cfg.LocalSSHAddr)
+	addr := s.dialAddr()
+	conn, err := s.dialAddrOnce(addr)
+	if err != nil && s.cfg.Heal != nil {
+		if s.cfg.Heal.Recover(s.ctx, err) {
+			addr = s.dialAddr()
+			conn, err = s.dialAddrOnce(addr)
+		}
+	}
 	if err != nil {
 		s.drop(id)
 		_ = s.write(protocol.Frame{
@@ -275,8 +292,11 @@ func (s *session) dial(id uint32) {
 			StreamID: id,
 			Payload:  []byte(protocol.ReasonDialFailed),
 		})
-		s.cfg.logger().Info("dial local ssh failed", "addr", s.cfg.LocalSSHAddr, "err", err)
+		s.cfg.logger().Info("dial local ssh failed", "addr", addr, "err", err)
 		return
+	}
+	if s.cfg.Heal != nil {
+		s.cfg.Heal.MarkOK(addr)
 	}
 	if !s.attach(id, conn) {
 		conn.Close()
@@ -293,6 +313,20 @@ func (s *session) dial(id uint32) {
 		return
 	}
 	go s.readLocal(id, conn)
+}
+
+func (s *session) dialAddr() string {
+	if s.cfg.Heal != nil {
+		if addr := s.cfg.Heal.Addr(); addr != "" {
+			return addr
+		}
+	}
+	return s.cfg.LocalSSHAddr
+}
+
+func (s *session) dialAddrOnce(addr string) (net.Conn, error) {
+	d := net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(s.ctx, "tcp", addr)
 }
 
 func (s *session) reserve(id uint32) bool {

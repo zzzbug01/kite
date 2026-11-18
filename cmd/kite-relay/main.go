@@ -41,6 +41,7 @@ func run(args []string) error {
 	fs.StringVar(&cfg.RegistrationKey, "registration-key", cfg.RegistrationKey, "shared registration key (env REGISTRATION_KEY)")
 	fs.StringVar(&cfg.RegistrationKeyPrevious, "registration-key-previous", cfg.RegistrationKeyPrevious, "previous registration key still accepted during rotation (env REGISTRATION_KEY_PREVIOUS)")
 	fs.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "directory for hashed client tokens (env STATE_DIR)")
+	fs.StringVar(&cfg.TrustedProxies, "trusted-proxies", cfg.TrustedProxies, "comma-separated IPs or CIDRs allowed to set X-Forwarded-For (env TRUSTED_PROXIES). Empty trusts only loopback. \"none\" ignores the header")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate (env TLS_CERT_FILE); plain WS if unset")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key (env TLS_KEY_FILE)")
 	idle := fs.Duration("idle-timeout", cfg.IdleTimeout, "close a connection after this long with no received frames (env IDLE_TIMEOUT)")
@@ -86,12 +87,17 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), process.ShutdownSignals()...)
 	defer stop()
 
+	trusted, err := relay.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return err
+	}
 	slog.Info("kite-relay listening", "version", version.Version, "addr", ln.Addr().String(), "tls", cfg.TLSCertFile != "")
 	srv := relay.New(relay.Config{
 		RegistrationKey: cfg.RegistrationKey,
 		PreviousKey:     cfg.RegistrationKeyPrevious,
 		StateDir:        cfg.StateDir,
 		IdleTimeout:     cfg.IdleTimeout,
+		TrustedProxies:  trusted,
 	})
 	return srv.Serve(ctx, ln, cfg.TLSCertFile, cfg.TLSKeyFile)
 }

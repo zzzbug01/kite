@@ -37,7 +37,7 @@ flowchart LR
 
 The usual deployment is plain WebSocket on `127.0.0.1:8080`, with nginx or Caddy terminating TLS. kite-relay can serve TLS itself when both `TLS_CERT_FILE` and `TLS_KEY_FILE` are set.
 
-One WebSocket per agent carries many SSH streams. Each frame is a 5-byte header (1-byte type, 4-byte big-endian stream id) plus a payload of at most 256 KiB. An agent connection holds at most 64 streams. Ping (type 10) and pong (type 11) are exchanged every 20 seconds. A connection with no received frames for `IDLE_TIMEOUT` (default 90s) is dropped. Those application heartbeats, not TCP keepalives, are what keep an idle tunnel open through a reverse proxy.
+One WebSocket per agent carries many SSH streams. Each frame is a 5-byte header (1-byte type, 4-byte big-endian stream id) plus a payload of at most 256 KiB. An agent connection holds at most 64 streams. Ping (type 10) and pong (type 11) are exchanged every 20 seconds. A connection with no received frames for `IDLE_TIMEOUT` (default 90s) is dropped. Those application heartbeats, not TCP keepalives, are what keep an idle tunnel open through a reverse proxy. An upgraded socket that never sends its hello is closed after 10 seconds with `handshake timeout`. The idle timer does not start until authentication succeeds.
 
 Agents present one shared `REGISTRATION_KEY`. Clients may present that same key, or a per-client token from `kite connect`. The relay compares registration keys in constant time and stores only a hash of each client token. A newer agent with the same name replaces the previous connection. Pairing uses two extra frame types (12 and 13) on the agent connection. A peer that does not know them ignores the frame and the other side reports that pairing is unsupported.
 
@@ -109,6 +109,10 @@ What `install` does to sshd, and does again if you re-run it:
 - macOS: if Remote Login is off, root runs `systemsetup -setremotelogin on`. Without root, that command is printed with `sudo`.
 
 `kite-agent setup` is the same SSH check without registering the agent. `--skip-ssh-setup` skips it during install.
+
+If you did not set `LOCAL_SSH_ADDR` or `--local`, install reads `sshd_config` (including `Include` directories) and the addresses sshd is actually listening on. A loopback socket wins. A wildcard `ListenAddress` still dials `127.0.0.1`. The chosen address is written as `local_ssh_addr` with `local_ssh_addr_auto: true`. An address you set yourself is left alone.
+
+While the agent is running, a failed dial of that address is retried at most once every 30 seconds. If sshd is stopped, root (or the Windows service) starts it and sets Automatic on Windows. If the saved address was auto-detected and sshd has moved, the agent switches and records `port changed from X to Y`. `kite-agent status` prints the last result: `ok`, `sshd stopped`, `started by kite`, `port changed from X to Y`, or `failed`.
 
 On Linux, root `install` also writes `/etc/kite/agent.env` (mode 0600), copies the binary to `/usr/local/bin/kite-agent`, and enables `kite-agent.service`. On macOS, root `install` bootstraps a LaunchDaemon that reads `/etc/kite/agent.env`. On Windows, `install` registers the Service Control Manager service described under Manual setup.
 
@@ -298,6 +302,7 @@ git push origin v0.1.0-rc.2
 | `AGENT_NAME` | agent | required |
 | `LOCAL_SSH_ADDR` | agent | `127.0.0.1:22` |
 | `SSH_USER` | agent | account that receives paired keys |
+| `TRUSTED_PROXIES` | relay | empty: trust X-Forwarded-For only from loopback, using the right-most address |
 
 Flags: `--listen`, `--registration-key`, `--registration-key-previous`, `--state-dir`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--ssh-user`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite. `kite-agent install` also accepts `--install-dir` and `--skip-ssh-setup`. `kite connect` accepts `--relay` and `--label`. `kite-agent pair` accepts `--ttl` (default 10m, maximum 30m).
 
@@ -344,7 +349,7 @@ flowchart LR
 
 常见部署是中继在 `127.0.0.1:8080` 上提供明文 WebSocket，由 nginx 或 Caddy 终结 TLS。只有同时设置 `TLS_CERT_FILE` 和 `TLS_KEY_FILE` 时，kite-relay 才自己提供 TLS。
 
-每个 agent 一条 WebSocket，上面复用多路 SSH。帧格式是 5 字节头（1 字节类型 + 4 字节大端流编号）再加最多 256 KiB 的载荷。一条 agent 连接最多 64 路。每 20 秒交换一次 ping（类型 10）和 pong（类型 11）。`IDLE_TIMEOUT`（默认 90 秒）内没有收到任何帧就断开。穿过反向代理时，靠的是这个应用层心跳，而不是 TCP keepalive。
+每个 agent 一条 WebSocket，上面复用多路 SSH。帧格式是 5 字节头（1 字节类型 + 4 字节大端流编号）再加最多 256 KiB 的载荷。一条 agent 连接最多 64 路。每 20 秒交换一次 ping（类型 10）和 pong（类型 11）。`IDLE_TIMEOUT`（默认 90 秒）内没有收到任何帧就断开。穿过反向代理时，靠的是这个应用层心跳，而不是 TCP keepalive。升级成 WebSocket 之后如果一直不发 hello，10 秒后会关掉，原因是 `handshake timeout`。认证成功之前不开始空闲计时。
 
 agent 出示共享的 `REGISTRATION_KEY`。客户端可以出示同一把密钥，也可以出示 `kite connect` 发的每客户端令牌。中继用常数时间比较注册密钥，客户端令牌只存哈希。同名 agent 新连接会替换旧连接。配对在 agent 连接上多用两种帧（12 和 13）。不认识的一端会忽略这种帧，另一端会说明对方还不支持配对。
 
@@ -416,6 +421,10 @@ kite-agent pair
 - macOS：远程登录关着时，root 执行 `systemsetup -setremotelogin on`。不是 root 就打印带 `sudo` 的同一条命令。
 
 `kite-agent setup` 只做 SSH 检查，不注册 agent。`install --skip-ssh-setup` 可以跳过这一步。
+
+如果没有设置 `LOCAL_SSH_ADDR` 或 `--local`，install 会读 `sshd_config`（包括 `Include` 目录）以及 sshd 当前正在监听的地址。优先用回环地址。`ListenAddress` 是任意地址时仍然拨 `127.0.0.1`。结果写入 `local_ssh_addr`，并标上 `local_ssh_addr_auto: true`。你自己写的地址不会被改掉。
+
+agent 运行中如果拨这个地址失败，最多每 30 秒处理一次。sshd 没在跑时，root（Windows 上是服务）会尝试启动它，Windows 上还会把启动类型设成 Automatic。如果地址是自动检测的、而 sshd 已经换了端口，agent 会改过去，并记下 `port changed from X to Y`。`kite-agent status` 显示最近一次结果：`ok`、`sshd stopped`、`started by kite`、`port changed from X to Y` 或 `failed`。
 
 在 Linux 上，root 执行的 `install` 还会写入 `/etc/kite/agent.env`（权限 0600），把程序拷到 `/usr/local/bin/kite-agent`，并 enable `kite-agent.service`。在 macOS 上，root 执行的 `install` 会加载一个读取 `/etc/kite/agent.env` 的 LaunchDaemon。在 Windows 上，`install` 注册下面「手动安装」里说的服务。
 
@@ -605,6 +614,7 @@ git push origin v0.1.0-rc.2
 | `AGENT_NAME` | agent | 必填 |
 | `LOCAL_SSH_ADDR` | agent | `127.0.0.1:22` |
 | `SSH_USER` | agent | 接受配对公钥的账户 |
+| `TRUSTED_PROXIES` | 中继 | 空：只信任来自回环地址的 X-Forwarded-For，并取最右边那一项 |
 
 对应参数：`--listen`、`--registration-key`、`--registration-key-previous`、`--state-dir`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--ssh-user`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。`kite-agent install` 还可以用 `--install-dir` 和 `--skip-ssh-setup`。`kite connect` 可以用 `--relay` 和 `--label`。`kite-agent pair` 可以用 `--ttl`（默认 10 分钟，最长 30 分钟）。
 

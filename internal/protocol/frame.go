@@ -93,7 +93,14 @@ const (
 	ReasonOpenTimeout    = "open timeout"
 	ReasonOpenFailed     = "open failed"
 	ReasonDialFailed     = "dial local ssh failed"
+	// ReasonHandshakeTimeout is sent when the first hello never arrives.
+	// The connection is closed after this frame. It is not an idle timeout.
+	ReasonHandshakeTimeout = "handshake timeout"
 )
+
+// HandshakeTimeout is how long an upgraded WebSocket may sit without a
+// hello. Authenticated connections use IDLE_TIMEOUT instead.
+const HandshakeTimeout = 10 * time.Second
 
 // ErrShortFrame is returned when a buffer is smaller than the header.
 var ErrShortFrame = errors.New("frame shorter than 5 bytes")

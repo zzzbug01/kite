@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -23,7 +24,7 @@ func (s *Server) handlePairCreate(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	if !s.registrationOK(req.Key) {
 		s.log.Info("pair create rejected", "remote", ip, "result", "unauthorized")
 		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
@@ -69,7 +70,7 @@ func (s *Server) handlePairCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePairRedeem(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	var req pairing.RedeemRequest
 	if err := readJSON(r, &req); err != nil {
 		_ = s.broker.TouchRedeem(ip)
@@ -187,23 +188,97 @@ func writeAPIError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func clientIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+func (s *Server) clientIP(r *http.Request) string {
+	return ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), s.trusted)
+}
+
+// ClientIP returns the address to rate-limit. When the TCP peer is a trusted
+// proxy, the right-most X-Forwarded-For entry is the one that proxy appended.
+// The left-most entry is whatever the client sent and is not trusted.
+// Direct connections ignore the header.
+func ClientIP(remoteAddr, xff string, trusted []*net.IPNet) string {
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			first := strings.TrimSpace(strings.Split(fwd, ",")[0])
-			if net.ParseIP(first) != nil {
-				return first
-			}
-		}
-	}
 	if host == "" {
-		return "unknown"
+		host = "unknown"
+	}
+	if !peerTrusted(host, trusted) {
+		return host
+	}
+	if ip := rightmostIP(xff); ip != "" {
+		return ip
 	}
 	return host
+}
+
+func peerTrusted(host string, trusted []*net.IPNet) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if trusted == nil {
+		return ip.IsLoopback()
+	}
+	for _, n := range trusted {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func rightmostIP(xff string) string {
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := strings.TrimSpace(parts[i])
+		if p == "" {
+			continue
+		}
+		if ip := net.ParseIP(p); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+// ParseTrustedProxies parses a comma-separated list of IPs and CIDRs.
+// An empty string means the default (loopback only), reported as a nil slice.
+// "none" trusts nobody and ignores X-Forwarded-For.
+func ParseTrustedProxies(spec string) ([]*net.IPNet, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	if strings.EqualFold(spec, "none") {
+		return []*net.IPNet{}, nil
+	}
+	var out []*net.IPNet
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if strings.Contains(part, "/") {
+			_, n, err := net.ParseCIDR(part)
+			if err != nil {
+				return nil, fmt.Errorf("TRUSTED_PROXIES %q: %w", part, err)
+			}
+			out = append(out, n)
+			continue
+		}
+		ip := net.ParseIP(part)
+		if ip == nil {
+			return nil, fmt.Errorf("TRUSTED_PROXIES %q is not an IP or CIDR", part)
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
+	return out, nil
 }
 
 func newID() string {

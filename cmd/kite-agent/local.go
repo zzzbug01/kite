@@ -16,6 +16,7 @@ import (
 	"github.com/zzzbug01/kite/internal/authkeys"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/pairing"
+	"github.com/zzzbug01/kite/internal/sshaddr"
 	"github.com/zzzbug01/kite/internal/sshsetup"
 )
 
@@ -42,6 +43,12 @@ func runSetup(args []string) error {
 	}
 	rep, err := sshsetup.Ensure(context.Background(), *local)
 	fmt.Fprint(os.Stdout, rep.Text())
+	if addr, derr := sshaddr.Detect(context.Background()); derr != nil {
+		fmt.Fprintf(os.Stdout, "local ssh: detection failed (%s); default %s\n", derr, *local)
+	} else {
+		fmt.Fprintf(os.Stdout, "local ssh: %s\n", addr)
+		fmt.Fprintln(os.Stdout, "install writes this address when local_ssh_addr was not set explicitly")
+	}
 	return err
 }
 
@@ -174,7 +181,7 @@ func printCode(agentName, code string, exp time.Time, relay string) {
 	fmt.Fprintf(os.Stdout, "Agent: %s\n", agentName)
 	fmt.Fprintf(os.Stdout, "Pairing code: %s\n", code)
 	if !exp.IsZero() {
-		fmt.Fprintf(os.Stdout, "Expires: %s (one time)\n", exp.UTC().Format(time.RFC3339))
+		fmt.Fprintf(os.Stdout, "Expires: %s (one time)\n", exp.In(time.Local).Format(time.RFC3339))
 	}
 	fmt.Fprintln(os.Stdout)
 	fmt.Fprintln(os.Stdout, "On the computer you connect from:")

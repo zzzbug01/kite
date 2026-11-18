@@ -10,12 +10,15 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 
 	"github.com/zzzbug01/kite/internal/agent"
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/process"
+	"github.com/zzzbug01/kite/internal/sshaddr"
+	"github.com/zzzbug01/kite/internal/sshheal"
 	"github.com/zzzbug01/kite/internal/sshsetup"
 	"github.com/zzzbug01/kite/internal/version"
 )
@@ -67,6 +70,17 @@ func run(args []string) error {
 		} else {
 			fmt.Fprintf(os.Stdout, "ssh user: %s\n", opt.Config.SSHUser)
 		}
+		if !opt.Config.LocalExplicit {
+			if addr, err := sshaddr.Detect(context.Background()); err != nil {
+				fmt.Fprintf(os.Stdout, "local ssh: detection failed (%s); using %s\n", err, opt.Config.LocalSSHAddr)
+			} else if addr != "" {
+				opt.Config.LocalSSHAddr = addr
+				opt.Config.LocalSSHAuto = true
+				fmt.Fprintf(os.Stdout, "local ssh: %s (auto)\n", addr)
+			}
+		} else {
+			fmt.Fprintf(os.Stdout, "local ssh: %s (configured)\n", opt.Config.LocalSSHAddr)
+		}
 		return agentsvc.Install(opt)
 	case agentsvc.CmdPair:
 		return runPair(rest)
@@ -101,11 +115,24 @@ func run(args []string) error {
 		if done || err != nil {
 			return err
 		}
-		text, err := agentsvc.Status(name)
-		if err != nil {
-			return err
+		var text string
+		if runtime.GOOS == "windows" {
+			var err error
+			text, err = agentsvc.Status(name)
+			if err != nil {
+				return err
+			}
+		} else {
+			text = "Service control is the Windows service. On Linux use systemctl; on macOS use launchctl.\n"
+		}
+		paths := sshheal.Search()
+		if runtime.GOOS == "windows" {
+			if lay, err := agentsvc.DefaultLayout(name); err == nil {
+				paths = []string{sshheal.File(lay.ConfigPath)}
+			}
 		}
 		fmt.Fprint(os.Stdout, text)
+		fmt.Fprintln(os.Stdout, sshheal.LoadFirst(paths).Line())
 		return nil
 	case agentsvc.CmdList:
 		if err := agentsvc.ParseList(rest); err != nil {
@@ -250,5 +277,7 @@ func runAgent(ctx context.Context, opt agentsvc.Options) error {
 		SSHUser:         opt.Config.SSHUser,
 		EnableControl:   true,
 		ConfigPath:      opt.ConfigPath,
+		LocalSSHAuto:    opt.Config.LocalSSHAuto,
+		EnableHeal:      true,
 	})
 }
