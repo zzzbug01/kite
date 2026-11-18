@@ -1,4 +1,5 @@
 // Command kite-agent dials a kite relay and forwards streams to the local SSH server.
+// On Windows it can also install and control that process as a service.
 package main
 
 import (
@@ -9,73 +10,173 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/zzzbug01/kite/internal/agent"
+	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/process"
-	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/version"
 )
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	if err := run(os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintf(os.Stderr, "kite-agent: %s\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
-	cfg, err := config.LoadAgent(config.PeekConfigFlag(args))
+	cmd, rest, err := agentsvc.Split(args)
 	if err != nil {
 		return err
 	}
+	switch cmd {
+	case agentsvc.CmdHelp:
+		return help(rest)
+	case agentsvc.CmdRun:
+		inService, err := agentsvc.RunningAsService()
+		if err != nil {
+			return err
+		}
+		if inService {
+			return runService(rest)
+		}
+		return runForeground(rest)
+	case agentsvc.CmdInstall:
+		opt, done, err := ready(rest, true)
+		if done || err != nil {
+			return err
+		}
+		return agentsvc.Install(opt)
+	case agentsvc.CmdUninstall:
+		if err := rejectExtra(rest); err != nil {
+			return err
+		}
+		return agentsvc.Uninstall()
+	case agentsvc.CmdStart:
+		if err := rejectExtra(rest); err != nil {
+			return err
+		}
+		return agentsvc.Start()
+	case agentsvc.CmdStop:
+		if err := rejectExtra(rest); err != nil {
+			return err
+		}
+		return agentsvc.Stop()
+	case agentsvc.CmdRestart:
+		if err := rejectExtra(rest); err != nil {
+			return err
+		}
+		return agentsvc.Restart()
+	case agentsvc.CmdStatus:
+		if err := rejectExtra(rest); err != nil {
+			return err
+		}
+		text, err := agentsvc.Status()
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(os.Stdout, text)
+		return nil
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", cmd, agentsvc.Usage())
+	}
+}
+
+func help(args []string) error {
+	if len(args) == 1 {
+		switch strings.ToLower(args[0]) {
+		case "install":
+			_, err := agentsvc.ParseOptions([]string{"-h"}, true)
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		case "run":
+			_, err := agentsvc.ParseOptions([]string{"-h"}, false)
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		}
+	}
+	fmt.Fprint(os.Stderr, agentsvc.Usage())
+	return nil
+}
+
+func ready(args []string, install bool) (agentsvc.Options, bool, error) {
+	opt, err := agentsvc.ParseOptions(args, install)
+	if errors.Is(err, flag.ErrHelp) {
+		return agentsvc.Options{}, true, nil
+	}
+	if err != nil {
+		return agentsvc.Options{}, false, err
+	}
+	if opt.ShowVersion {
+		fmt.Printf("kite-agent %s\n", version.Version)
+		return opt, true, nil
+	}
+	return opt, false, nil
+}
+
+func rejectExtra(args []string) error {
 	fs := flag.NewFlagSet("kite-agent", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	showVersion := fs.Bool("version", false, "print version and exit")
-	fs.String("config", "", "YAML config file (or KITE_CONFIG). Keep it gitignored; do not commit secrets")
-	fs.StringVar(&cfg.RelayAddr, "relay", cfg.RelayAddr, "relay WebSocket URL (env RELAY_ADDR), for example wss://tunnel.example.com/agent")
-	fs.StringVar(&cfg.RegistrationKey, "registration-key", cfg.RegistrationKey, "shared registration key (env REGISTRATION_KEY)")
-	fs.StringVar(&cfg.Name, "name", cfg.Name, "agent name (env AGENT_NAME); must match the ssh Host alias")
-	fs.StringVar(&cfg.LocalSSHAddr, "local", cfg.LocalSSHAddr, "local SSH address to dial (env LOCAL_SSH_ADDR). The relay cannot change this")
-	idle := fs.Duration("idle-timeout", cfg.IdleTimeout, "reconnect after this long with no received frames (env IDLE_TIMEOUT)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: kite-agent [flags]\n\n")
-		fmt.Fprintf(fs.Output(), "Dials the relay and forwards incoming streams only to LOCAL_SSH_ADDR\n")
-		fmt.Fprintf(fs.Output(), "(default 127.0.0.1:22). Set REGISTRATION_KEY and RELAY_ADDR via the environment\n")
-		fmt.Fprintf(fs.Output(), "or a gitignored config file. Never commit them.\n\n")
-		fs.PrintDefaults()
+		fmt.Fprint(fs.Output(), agentsvc.Usage())
 	}
 	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
 		return err
-	}
-	if *showVersion {
-		fmt.Printf("kite-agent %s\n", version.Version)
-		return nil
 	}
 	if fs.NArg() != 0 {
 		return errors.New("unexpected arguments")
 	}
-	cfg.IdleTimeout = *idle
-	if err := config.ValidateKey(cfg.RegistrationKey); err != nil {
+	return nil
+}
+
+func runForeground(args []string) error {
+	opt, done, err := ready(args, false)
+	if done || err != nil {
 		return err
 	}
-	if !protocol.ValidName(cfg.Name) {
-		return errors.New("AGENT_NAME is required and must not contain whitespace")
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), process.ShutdownSignals()...)
 	defer stop()
+	slog.Info("kite-agent starting", "version", version.Version, "name", opt.Config.Name, "local", opt.Config.LocalSSHAddr)
+	return runAgent(ctx, opt)
+}
 
-	slog.Info("kite-agent starting", "version", version.Version, "name", cfg.Name, "local", cfg.LocalSSHAddr)
+func runService(args []string) error {
+	logPath := agentsvc.LogPath(config.PeekConfigFlag(args))
+	if f, err := agentsvc.OpenLog(logPath); err != nil {
+		agentsvc.LogServiceError(fmt.Errorf("open log %s: %w", logPath, err))
+	} else {
+		defer f.Close()
+		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	}
+	opt, err := agentsvc.ParseOptions(args, false)
+	if err != nil {
+		slog.Error("kite-agent configuration", "err", err)
+		agentsvc.LogServiceError(err)
+		return err
+	}
+	if opt.ShowVersion {
+		fmt.Printf("kite-agent %s\n", version.Version)
+		return nil
+	}
+	slog.Info("kite-agent service starting", "version", version.Version, "name", opt.Config.Name, "local", opt.Config.LocalSSHAddr)
+	return agentsvc.Serve(func(ctx context.Context) error {
+		return runAgent(ctx, opt)
+	})
+}
+
+func runAgent(ctx context.Context, opt agentsvc.Options) error {
 	return agent.Run(ctx, agent.Config{
-		RelayURL:        cfg.RelayAddr,
-		RegistrationKey: cfg.RegistrationKey,
-		Name:            cfg.Name,
-		LocalSSHAddr:    cfg.LocalSSHAddr,
-		IdleTimeout:     cfg.IdleTimeout,
+		RelayURL:        opt.Config.RelayAddr,
+		RegistrationKey: opt.Config.RegistrationKey,
+		Name:            opt.Config.Name,
+		LocalSSHAddr:    opt.Config.LocalSSHAddr,
+		IdleTimeout:     opt.Config.IdleTimeout,
 	})
 }

@@ -58,10 +58,13 @@ jobs:
           mkdir -p dist
           archive="kite_${version}_${GOOS}_${GOARCH}"
           if [ "${GOOS}" = "windows" ]; then
+            cp "${GITHUB_WORKSPACE}/deploy/WINDOWS.txt" "${stage}/WINDOWS.txt"
+            cp "${GITHUB_WORKSPACE}/deploy/install-kite-agent.ps1" "${stage}/install-kite-agent.ps1"
             (
               cd "${stage}"
               zip -r "${GITHUB_WORKSPACE}/dist/${archive}.zip" \
-                "kite.exe" "kite-agent.exe" "kite-relay.exe"
+                "kite.exe" "kite-agent.exe" "kite-relay.exe" \
+                "WINDOWS.txt" "install-kite-agent.ps1"
             )
           else
             tar -C "${stage}" -czf "dist/${archive}.tar.gz" kite kite-agent kite-relay
@@ -93,7 +96,7 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-          # Tags such as v0.1.0-rc.1 are prereleases. v0.1.0 is not.
+          # Tags such as v0.1.0-rc.2 are prereleases. v0.1.0 is not.
           PRERELEASE: ${{ contains(github.ref_name, '-') }}
         run: |
           set -euo pipefail
@@ -104,6 +107,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" artifacts/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
-            --notes "$(printf 'kite %s\n\nStatic binaries built with CGO_ENABLED=0 for linux, windows, and macOS.\nSee the README for relay, agent, and SSH ProxyCommand setup.\n' "${GITHUB_REF_NAME}")" \
+            --notes "$(printf 'kite %s\n\nStatic binaries built with CGO_ENABLED=0 for linux, windows, and macOS.\nOn Windows, kite-agent.exe installs and controls a service (install, status, start, stop) with no console window. See the README and WINDOWS.txt in the Windows zip.\n' "${GITHUB_REF_NAME}")" \
             --verify-tag \
             "${extra[@]}"

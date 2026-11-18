@@ -1,14 +1,20 @@
 #Requires -Version 5.1
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Install kite-agent and register a Task Scheduler job that starts it at logon.
+    Install kite-agent as a Windows service.
 
 .DESCRIPTION
-    Writes a local wrapper script containing the registration key and points a
-    scheduled task at that wrapper. The wrapper is created under the install
-    directory, not in this git repository. Do not commit it.
+    Calls `kite-agent install`. The service starts at boot, including when
+    nobody is logged on, and it does not open a console window.
 
-    This script refuses the placeholder key CHANGE_ME.
+    Settings are passed to the installer through environment variables. The
+    installer writes them to %ProgramData%\kite\config.yaml (or -ConfigPath)
+    and does not put the registration key on the service command line.
+    This script does not write a wrapper and does not register a scheduled task.
+
+    The placeholder key CHANGE_ME and the placeholder host tunnel.example.com
+    are refused. Do not commit the generated config file.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\install-kite-agent.ps1 `
@@ -23,7 +29,7 @@ param(
     [string]$RegistrationKey = "CHANGE_ME",
     [string]$AgentName = "my-pc",
     [string]$LocalSSHAddr = "127.0.0.1:22",
-    [string]$TaskName = "kite-agent"
+    [string]$ConfigPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,37 +45,59 @@ if ([string]::IsNullOrWhiteSpace($AgentName)) {
 }
 
 if (-not $BinaryPath) {
+    $beside = Join-Path $PSScriptRoot "kite-agent.exe"
+    if (Test-Path -LiteralPath $beside) {
+        $BinaryPath = $beside
+    }
+}
+if (-not $BinaryPath) {
     $cmd = Get-Command kite-agent.exe -ErrorAction SilentlyContinue
     if ($cmd) {
         $BinaryPath = $cmd.Source
+    }
+}
+if (-not $BinaryPath) {
+    $installed = Join-Path $InstallDir "kite-agent.exe"
+    if (Test-Path -LiteralPath $installed) {
+        $BinaryPath = $installed
     }
 }
 if (-not $BinaryPath -or -not (Test-Path -LiteralPath $BinaryPath)) {
     Write-Error "kite-agent.exe was not found. Pass -BinaryPath."
 }
 
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$destExe = Join-Path $InstallDir "kite-agent.exe"
-Copy-Item -LiteralPath $BinaryPath -Destination $destExe -Force
+$previous = @{
+    RELAY_ADDR       = [Environment]::GetEnvironmentVariable("RELAY_ADDR", "Process")
+    REGISTRATION_KEY = [Environment]::GetEnvironmentVariable("REGISTRATION_KEY", "Process")
+    AGENT_NAME       = [Environment]::GetEnvironmentVariable("AGENT_NAME", "Process")
+    LOCAL_SSH_ADDR   = [Environment]::GetEnvironmentVariable("LOCAL_SSH_ADDR", "Process")
+}
 
-$wrapper = Join-Path $InstallDir "start-kite-agent.cmd"
-# Quote for cmd.exe. The key is written only to this local file.
-$lines = @(
-    "@echo off",
-    "setlocal",
-    "set `"RELAY_ADDR=$RelayAddr`"",
-    "set `"REGISTRATION_KEY=$RegistrationKey`"",
-    "set `"AGENT_NAME=$AgentName`"",
-    "set `"LOCAL_SSH_ADDR=$LocalSSHAddr`"",
-    "`"$destExe`""
-)
-Set-Content -LiteralPath $wrapper -Value $lines -Encoding ASCII
+$env:RELAY_ADDR = $RelayAddr
+$env:REGISTRATION_KEY = $RegistrationKey
+$env:AGENT_NAME = $AgentName
+$env:LOCAL_SSH_ADDR = $LocalSSHAddr
 
-$action = New-ScheduledTaskAction -Execute $wrapper
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
+$installArgs = @("install", "--install-dir", $InstallDir)
+if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
+    $installArgs += @("--config", $ConfigPath)
+}
 
-Write-Host "Installed $destExe"
-Write-Host "Scheduled task '$TaskName' runs $wrapper at logon."
-Write-Host "The wrapper holds the registration key. Leave it out of git."
+try {
+    & $BinaryPath @installArgs
+    $code = $LASTEXITCODE
+    if ($null -eq $code) {
+        $code = 0
+    }
+} finally {
+    foreach ($name in @("RELAY_ADDR", "REGISTRATION_KEY", "AGENT_NAME", "LOCAL_SSH_ADDR")) {
+        $prior = $previous[$name]
+        if ($null -eq $prior) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item "Env:$name" $prior
+        }
+    }
+}
+
+exit $code

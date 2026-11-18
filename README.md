@@ -51,6 +51,8 @@ Do not commit real registration keys, real domains, public IPs, TLS certificates
 
 `.gitignore` excludes `.env`, `*.pem`, `*.key`, `*.crt`, `config.yaml`, `config.yml`, `config.toml`, and `config.json`. Tracked examples live at `config.example.yaml` and `deploy/*.example`.
 
+On Windows the service reads `%ProgramData%\kite\config.yaml`, unless `kite-agent install --config` recorded another path outside your user profile. That file is created on the machine. Do not commit it.
+
 Copy `config.example.yaml` if you want a file. Environment variables override the file. Flags override both.
 
 ## Quick start
@@ -107,16 +109,42 @@ launchctl load ~/Library/LaunchAgents/com.kite.agent.plist
 
 The plist has no secrets. It sources `~/.config/kite/agent.env`.
 
-Windows: from an elevated PowerShell, after placing `kite-agent.exe` on `PATH` or passing `-BinaryPath`:
+Windows runs `kite-agent` as a service. It starts at boot, including when nobody is logged on, and it does not open a console window. From an elevated PowerShell (Run as administrator), in the directory that contains `kite-agent.exe`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy\install-kite-agent.ps1 `
-    -RelayAddr "wss://tunnel.example.com/agent" `
-    -RegistrationKey "CHANGE_ME" `
-    -AgentName "my-pc"
+$env:RELAY_ADDR = "wss://tunnel.example.com/agent"
+$env:REGISTRATION_KEY = "CHANGE_ME"
+$env:AGENT_NAME = "my-pc"
+.\kite-agent.exe install
+.\kite-agent.exe status
 ```
 
-Replace both placeholders before running. The script writes `start-kite-agent.cmd` under the install directory and registers a logon task. `deploy/kite-agent-task.xml` is the same task without a key, if you prefer `schtasks /Create /XML`. Do not commit the generated wrapper.
+Replace both placeholders before running. `install` refuses `CHANGE_ME` and `tunnel.example.com`.
+
+`install` copies the binary to `%ProgramFiles%\kite\kite-agent.exe`, writes `%ProgramData%\kite\config.yaml`, and registers service `kite-agent` as automatic (delayed). The service command line is the executable plus `--config`. The registration key stays in that file. Its ACL grants SYSTEM, Administrators, and the user who ran `install`. LocalSystem does not see your shell environment and does not load a file under `%USERPROFILE%`, so the service reads the file written at install. If a variable is set in the service process itself, it still overrides the file. A normal install does not set service environment variables.
+
+```powershell
+kite-agent status      # no elevation required
+kite-agent stop         # elevated
+kite-agent start        # elevated
+kite-agent restart      # elevated
+kite-agent uninstall    # elevated; leaves the config file in place
+```
+
+Logs are `%ProgramData%\kite\kite-agent.log`. `uninstall` does not delete the config file. Delete `%ProgramData%\kite\config.yaml` yourself to remove the registration key.
+
+If an older install registered a logon scheduled task named `kite-agent`, `install` deletes that task and deletes `start-kite-agent.cmd` from the install directory, so login no longer opens a console window.
+
+`deploy/install-kite-agent.ps1` is optional. It requires an elevated session and calls `kite-agent install`. It does not register a scheduled task and it does not write a command wrapper.
+
+Foreground debugging still opens a console. Stop the service first, or the relay keeps only the newer of the two connections:
+
+```powershell
+kite-agent stop
+kite-agent
+```
+
+To store the config somewhere other than `%ProgramData%\kite\config.yaml`, pass an absolute `--config` path that is not inside a user profile. The service account has to be able to read it. `install` also accepts `--install-dir` (default `%ProgramFiles%\kite`).
 
 ### SSH client
 
@@ -140,7 +168,7 @@ ssh my-pc
 
 ## Download
 
-Release tags `v*` build static binaries for `linux/amd64`, `linux/arm64`, `windows/amd64`, `darwin/amd64`, and `darwin/arm64`. Grab them from the [GitHub Releases](https://github.com/zzzbug01/kite/releases) page. Linux and macOS archives are `.tar.gz`. Windows is `.zip`. `SHA256SUMS` lists every file.
+Release tags `v*` build static binaries for `linux/amd64`, `linux/arm64`, `windows/amd64`, `darwin/amd64`, and `darwin/arm64`. Grab them from the [GitHub Releases](https://github.com/zzzbug01/kite/releases) page. Linux and macOS archives are `.tar.gz`. Windows is `.zip` and also contains `WINDOWS.txt` plus `install-kite-agent.ps1`. `kite-agent.exe install` is enough to register the service. `SHA256SUMS` lists every file.
 
 ```sh
 tar -xzf kite_v0.1.0_linux_amd64.tar.gz
@@ -161,12 +189,14 @@ make cross   # linux/amd64, linux/arm64, windows/amd64, darwin/amd64, darwin/arm
 
 ## Cut a release
 
-Tag and push. GitHub Actions (`.github/workflows/release.yml`) cross-compiles, packages, and attaches the archives to a GitHub Release. This repository does not ship a pre-made tag.
+Tag and push. GitHub Actions (`.github/workflows/release.yml`) cross-compiles, packages, and attaches the archives to a GitHub Release. This repository does not ship a pre-made tag. A tag that contains a hyphen is published as a GitHub prerelease.
 
 ```sh
-git tag v0.1.0
-git push --tags
+git tag v0.1.0-rc.2
+git push origin v0.1.0-rc.2
 ```
+
+`v0.1.0-rc.2` is a prerelease. `v0.1.0` is a stable release.
 
 ## Configuration
 
@@ -180,7 +210,9 @@ git push --tags
 | `AGENT_NAME` | agent | required |
 | `LOCAL_SSH_ADDR` | agent | `127.0.0.1:22` |
 
-Flags: `--listen`, `--registration-key`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite.
+Flags: `--listen`, `--registration-key`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite. `kite-agent install` also accepts `--install-dir`.
+
+On Windows, when no `--config` / `KITE_CONFIG` is set and the user config files are absent, kite-agent also reads `%ProgramData%\kite\config.yaml`. The installed service always passes `--config` so it does not depend on that search.
 
 ---
 
@@ -236,6 +268,8 @@ agent 只拨自己配置的 `LOCAL_SSH_ADDR`（默认 `127.0.0.1:22`）。打开
 不要提交真实的注册密钥、真实域名、公网 IP、TLS 证书或私钥。仓库里的示例只用占位符（`CHANGE_ME`、`tunnel.example.com`）。密钥如果还是 `CHANGE_ME`，程序会拒绝启动。
 
 `.gitignore` 排除 `.env`、`*.pem`、`*.key`、`*.crt`、`config.yaml`、`config.yml`、`config.toml` 和 `config.json`。会进仓库的示例是 `config.example.yaml` 和 `deploy/*.example`。
+
+Windows 服务读取 `%ProgramData%\kite\config.yaml`，除非 `kite-agent install --config` 指定了用户配置目录以外的路径。这个文件在本机生成，不要提交。
 
 需要文件时复制 `config.example.yaml`。环境变量覆盖文件，命令行参数再覆盖环境变量。
 
@@ -293,16 +327,42 @@ launchctl load ~/Library/LaunchAgents/com.kite.agent.plist
 
 这个 plist 里没有密钥，它会读取 `~/.config/kite/agent.env`。
 
-Windows：在提升权限的 PowerShell 里，把 `kite-agent.exe` 放到 `PATH` 上，或传入 `-BinaryPath`：
+Windows 把 `kite-agent` 作为服务运行。开机就会启动，不需要有人登录，也不会弹出控制台窗口。在包含 `kite-agent.exe` 的目录里，用提升权限的 PowerShell（以管理员身份运行）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy\install-kite-agent.ps1 `
-    -RelayAddr "wss://tunnel.example.com/agent" `
-    -RegistrationKey "CHANGE_ME" `
-    -AgentName "my-pc"
+$env:RELAY_ADDR = "wss://tunnel.example.com/agent"
+$env:REGISTRATION_KEY = "CHANGE_ME"
+$env:AGENT_NAME = "my-pc"
+.\kite-agent.exe install
+.\kite-agent.exe status
 ```
 
-运行前换掉两个占位符。脚本会在安装目录写下 `start-kite-agent.cmd`，并注册登录时启动的计划任务。`deploy/kite-agent-task.xml` 是不含密钥的同一任务，可以用 `schtasks /Create /XML` 导入。不要提交生成出来的包装脚本。
+运行前换掉两个占位符。`install` 会拒绝 `CHANGE_ME` 和 `tunnel.example.com`。
+
+`install` 把程序复制到 `%ProgramFiles%\kite\kite-agent.exe`，写入 `%ProgramData%\kite\config.yaml`，并把服务 `kite-agent` 注册为自动（延迟）启动。服务的命令行只有程序路径和 `--config`。注册密钥留在配置文件里，ACL 只给 SYSTEM、Administrators 和执行安装的用户。LocalSystem 看不到当前 shell 的环境变量，也不会加载 `%USERPROFILE%` 下的文件，所以服务读的是安装时写好的那份。如果服务进程自己的环境里有同名变量，仍然会覆盖文件。普通安装不会去设置那些变量。
+
+```powershell
+kite-agent status      # 不需要提升权限
+kite-agent stop         # 需要提升权限
+kite-agent start        # 需要提升权限
+kite-agent restart      # 需要提升权限
+kite-agent uninstall    # 需要提升权限；配置文件会留下来
+```
+
+日志是 `%ProgramData%\kite\kite-agent.log`。`uninstall` 不删除配置文件。要去掉注册密钥，请自行删除 `%ProgramData%\kite\config.yaml`。
+
+如果以前注册过名为 `kite-agent` 的登录计划任务，`install` 会删掉它，并删除安装目录里的 `start-kite-agent.cmd`，这样登录时不会再弹出控制台窗口。
+
+`deploy/install-kite-agent.ps1` 是可选的。它要求提升后的会话，然后调用 `kite-agent install`。它不会注册计划任务，也不会写包装脚本。
+
+前台调试仍然会打开控制台。先停掉服务，否则中继只保留后连上的那一条：
+
+```powershell
+kite-agent stop
+kite-agent
+```
+
+如果要把配置放到 `%ProgramData%\kite\config.yaml` 以外的地方，传一个不在用户配置目录里的绝对 `--config` 路径。服务账户必须能读到它。`install` 还可以用 `--install-dir`（默认 `%ProgramFiles%\kite`）。
 
 ### SSH 客户端
 
@@ -326,7 +386,7 @@ ssh my-pc
 
 ## 下载
 
-标签 `v*` 会为 `linux/amd64`、`linux/arm64`、`windows/amd64`、`darwin/amd64`、`darwin/arm64` 打静态二进制。从 [GitHub Releases](https://github.com/zzzbug01/kite/releases) 下载。Linux 和 macOS 是 `.tar.gz`，Windows 是 `.zip`，`SHA256SUMS` 列出全部文件。
+标签 `v*` 会为 `linux/amd64`、`linux/arm64`、`windows/amd64`、`darwin/amd64`、`darwin/arm64` 打静态二进制。从 [GitHub Releases](https://github.com/zzzbug01/kite/releases) 下载。Linux 和 macOS 是 `.tar.gz`，Windows 是 `.zip`，里面还有 `WINDOWS.txt` 和 `install-kite-agent.ps1`。注册服务只需要 `kite-agent.exe install`。`SHA256SUMS` 列出全部文件。
 
 ```sh
 tar -xzf kite_v0.1.0_linux_amd64.tar.gz
@@ -347,12 +407,14 @@ make cross   # linux/amd64、linux/arm64、windows/amd64、darwin/amd64、darwin
 
 ## 打一个版本
 
-打标签并推送。GitHub Actions（`.github/workflows/release.yml`）会交叉编译、打包，并把压缩包挂到 GitHub Release 上。这个仓库本身不带现成的 tag。
+打标签并推送。GitHub Actions（`.github/workflows/release.yml`）会交叉编译、打包，并把压缩包挂到 GitHub Release 上。这个仓库本身不带现成的 tag。标签名里带连字符时，发布会被标成 GitHub prerelease。
 
 ```sh
-git tag v0.1.0
-git push --tags
+git tag v0.1.0-rc.2
+git push origin v0.1.0-rc.2
 ```
+
+`v0.1.0-rc.2` 是预发布。`v0.1.0` 是正式版。
 
 ## 配置
 
@@ -366,4 +428,6 @@ git push --tags
 | `AGENT_NAME` | agent | 必填 |
 | `LOCAL_SSH_ADDR` | agent | `127.0.0.1:22` |
 
-对应参数：`--listen`、`--registration-key`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。
+对应参数：`--listen`、`--registration-key`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。`kite-agent install` 还可以用 `--install-dir`。
+
+在 Windows 上，如果没有 `--config` / `KITE_CONFIG`，也没有用户配置文件，kite-agent 还会读取 `%ProgramData%\kite\config.yaml`。装好的服务总会带上 `--config`，不依赖这个搜索顺序。

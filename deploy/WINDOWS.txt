@@ -1,0 +1,44 @@
+kite on Windows
+================
+
+kite-agent runs as a Windows service. It starts at boot, with or without a
+logged-on user, and it does not open a console window.
+
+From an elevated PowerShell (Run as administrator), in this directory:
+
+    $env:RELAY_ADDR = "wss://tunnel.example.com/agent"
+    $env:REGISTRATION_KEY = "CHANGE_ME"
+    $env:AGENT_NAME = "my-pc"
+    .\kite-agent.exe install
+    .\kite-agent.exe status
+
+Replace CHANGE_ME and tunnel.example.com before running. install refuses
+those placeholders.
+
+The service reads %ProgramData%\kite\config.yaml unless you pass another
+--config path outside your user profile. That file holds the registration
+key. Do not commit it. The service command line is only the executable and
+--config. LocalSystem does not load your user environment or profile.
+
+    kite-agent status     (no elevation required)
+    kite-agent stop        (elevated)
+    kite-agent start       (elevated)
+    kite-agent restart     (elevated)
+    kite-agent uninstall   (elevated; leaves the config file in place)
+
+Logs: %ProgramData%\kite\kite-agent.log
+
+install-kite-agent.ps1 in this zip calls the same install command. It does
+not register a scheduled task.
+
+Linux uses the systemd unit in the source repository (deploy/kite-agent.service).
+macOS uses deploy/com.kite.agent.plist. Neither file is in this zip.
+
+中文
+====
+
+在提升权限的 PowerShell 里设置 RELAY_ADDR、REGISTRATION_KEY、AGENT_NAME，
+然后运行 .\kite-agent.exe install。服务开机启动，没有控制台窗口。
+配置文件是 %ProgramData%\kite\config.yaml，不要把它提交到 git。
+kite-agent status 查看状态。stop / start / uninstall 需要管理员权限。
+uninstall 不会删除配置文件。日志是 %ProgramData%\kite\kite-agent.log。

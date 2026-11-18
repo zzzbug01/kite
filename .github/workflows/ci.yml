@@ -22,3 +22,15 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      - name: Windows cross-compile
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=0
+          export GOOS=windows
+          export GOARCH=amd64
+          go vet ./...
+          go build -o /tmp/kite.exe ./cmd/kite
+          go build -o /tmp/kite-agent.exe ./cmd/kite-agent
+          go build -o /tmp/kite-relay.exe ./cmd/kite-relay
+          go test -c -o /tmp/agentsvc.test.exe ./internal/agentsvc/

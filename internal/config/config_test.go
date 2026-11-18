@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,6 +120,32 @@ func TestPeekConfigFlag(t *testing.T) {
 	}
 	if got := PeekConfigFlag([]string{"--", "--config", "c.yaml"}); got != "" {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestConfigSearchSkipsMachinePathOffWindows(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	programData := t.TempDir()
+	t.Setenv("ProgramData", programData)
+
+	paths := configSearchPaths()
+	if runtime.GOOS == "windows" {
+		want := filepath.Join(programData, "kite", "config.yaml")
+		if len(paths) == 0 || !strings.EqualFold(paths[len(paths)-1], want) {
+			t.Fatalf("paths %v, want machine config %s", paths, want)
+		}
+		return
+	}
+	if WindowsMachineConfig() != "" {
+		t.Fatal("WindowsMachineConfig should be empty off Windows")
+	}
+	for _, p := range paths {
+		if strings.Contains(strings.ToLower(p), "programdata") {
+			t.Fatalf("non-windows search path %q", p)
+		}
 	}
 }
 

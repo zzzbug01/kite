@@ -2,7 +2,9 @@
 //
 // Precedence is flags (applied by callers) > environment > config file > defaults.
 // Registration secrets belong in the environment or a gitignored file such as
-// ~/.config/kite/config.yaml. Do not commit them.
+// ~/.config/kite/config.yaml. The Windows service reads
+// %ProgramData%\kite\config.yaml (see WindowsMachineConfig) unless install
+// recorded a different --config path. Do not commit those files.
 package config
 
 import (
@@ -11,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -289,24 +292,66 @@ func loadFile(explicit string) (File, error) {
 	return f, nil
 }
 
-// discoverConfig finds a user-level config outside the git working tree.
-// It does not read ./config.yaml implicitly: ssh runs ProxyCommand with an
-// arbitrary working directory.
-func discoverConfig() string {
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		p := filepath.Join(home, ".config", "kite", "config.yaml")
-		if isFile(p) {
-			return p
-		}
+// WindowsMachineConfig is the machine-wide agent config used by the Windows
+// service account. It is empty on other operating systems. LocalSystem does
+// not load a logged-on user's profile, so the service cannot rely on
+// %AppData% or a home-directory file.
+func WindowsMachineConfig() string {
+	if runtime.GOOS != "windows" {
+		return ""
 	}
-	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
-		p := filepath.Join(dir, "kite", "config.yaml")
-		if isFile(p) {
+	root := strings.TrimSpace(os.Getenv("ProgramData"))
+	if root == "" {
+		root = `C:\ProgramData`
+	}
+	return filepath.Join(root, "kite", "config.yaml")
+}
+
+// discoverConfig finds a config outside the git working tree.
+// It does not read ./config.yaml implicitly: ssh runs ProxyCommand with an
+// arbitrary working directory. User config wins over the Windows machine file
+// so an interactive session keeps its own settings; the service passes
+// --config explicitly and does not depend on this order.
+func discoverConfig() string {
+	for _, p := range configSearchPaths() {
+		if p != "" && isFile(p) {
 			return p
 		}
 	}
 	return ""
+}
+
+func configSearchPaths() []string {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, ".config", "kite", "config.yaml"))
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		p := filepath.Join(dir, "kite", "config.yaml")
+		if !containsPath(paths, p) {
+			paths = append(paths, p)
+		}
+	}
+	if p := WindowsMachineConfig(); p != "" {
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+func containsPath(paths []string, p string) bool {
+	for _, existing := range paths {
+		if sameConfigPath(existing, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameConfigPath(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
 }
 
 func isFile(path string) bool {

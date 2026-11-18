@@ -22,6 +22,8 @@ config.yaml
 config.yml
 config.toml
 config.json
+# Legacy Windows logon wrapper from older install scripts. The service keeps
+# the registration key in %ProgramData%\kite\config.yaml instead.
 start-kite-agent.cmd
 
 # Editor and OS

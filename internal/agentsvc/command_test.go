@@ -1,0 +1,328 @@
+package agentsvc
+
+import (
+	"errors"
+	"flag"
+	"io"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/zzzbug01/kite/internal/config"
+)
+
+func TestSplit(t *testing.T) {
+	cases := []struct {
+		args []string
+		cmd  Command
+		rest []string
+	}{
+		{nil, CmdRun, nil},
+		{[]string{"--relay", "ws://127.0.0.1/agent"}, CmdRun, []string{"--relay", "ws://127.0.0.1/agent"}},
+		{[]string{"install", "--name", "pc"}, CmdInstall, []string{"--name", "pc"}},
+		{[]string{"STATUS"}, CmdStatus, nil},
+		{[]string{"help"}, CmdHelp, nil},
+		{[]string{"--help"}, CmdHelp, nil},
+	}
+	for _, tc := range cases {
+		cmd, rest, err := Split(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if cmd != tc.cmd {
+			t.Fatalf("%v: got %s", tc.args, cmd)
+		}
+		if strings.Join(rest, " ") != strings.Join(tc.rest, " ") {
+			t.Fatalf("%v: rest %v", tc.args, rest)
+		}
+	}
+	if _, _, err := Split([]string{"frob"}); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatal(err)
+	}
+}
+
+func TestUsageMentionsServiceNotScheduledTask(t *testing.T) {
+	text := Usage()
+	for _, want := range []string{"kite-agent status", "kite-agent install", `%ProgramData%\kite\config.yaml`, "console window"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("usage missing %q", want)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "schtasks /create") {
+		t.Fatal(text)
+	}
+}
+
+func TestParseOptions(t *testing.T) {
+	isolateConfigEnv(t)
+	t.Setenv("RELAY_ADDR", "ws://127.0.0.1:8080")
+	t.Setenv("REGISTRATION_KEY", "test-key-value")
+	t.Setenv("AGENT_NAME", "my-pc")
+	t.Setenv("LOCAL_SSH_ADDR", "")
+	t.Setenv("IDLE_TIMEOUT", "")
+
+	opt, err := ParseOptions(nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.Config.RelayAddr != "ws://127.0.0.1:8080/agent" || opt.Config.Name != "my-pc" {
+		t.Fatalf("%+v", opt.Config)
+	}
+	if opt.Config.RegistrationKey != "test-key-value" {
+		t.Fatal("key not loaded")
+	}
+
+	opt, err = ParseOptions([]string{"--registration-key", "flag-key-value", "--name", "from-flag", "--install-dir", `D:\kite`}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.Config.Name != "from-flag" || opt.InstallDir != `D:\kite` || opt.Config.RegistrationKey != "flag-key-value" {
+		t.Fatalf("%+v", opt)
+	}
+
+	if _, err := ParseOptions([]string{"--install-dir", `D:\kite`}, false); err == nil {
+		t.Fatal("run should reject --install-dir")
+	}
+	t.Setenv("REGISTRATION_KEY", "CHANGE_ME")
+	if _, err := ParseOptions(nil, false); err == nil {
+		t.Fatal("placeholder key should be rejected")
+	}
+	t.Setenv("REGISTRATION_KEY", "test-key-value")
+	t.Setenv("AGENT_NAME", "bad name")
+	if _, err := ParseOptions(nil, false); err == nil {
+		t.Fatal("whitespace name should be rejected")
+	}
+
+	opt, err = ParseOptions([]string{"--version"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !opt.ShowVersion {
+		t.Fatal("expected version")
+	}
+	if _, err := ParseOptions([]string{"-h"}, false); !errors.Is(err, flag.ErrHelp) {
+		t.Fatal(err)
+	}
+}
+
+func TestHelpHidesRegistrationKey(t *testing.T) {
+	isolateConfigEnv(t)
+	t.Setenv("RELAY_ADDR", "ws://127.0.0.1:8080/agent")
+	t.Setenv("REGISTRATION_KEY", "test-key-value")
+	t.Setenv("AGENT_NAME", "my-pc")
+
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	_, parseErr := ParseOptions([]string{"-h"}, true)
+	w.Close()
+	os.Stderr = old
+	body, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) {
+		t.Fatal(parseErr)
+	}
+	if strings.Contains(string(body), "test-key-value") {
+		t.Fatalf("help printed the registration key:\n%s", body)
+	}
+}
+
+func TestWriteAgentFileRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	initial := []byte("relay:\n  listen_addr: 127.0.0.1:9\nclient:\n  relay_addr: ws://127.0.0.1:9/client\nagent:\n  name: old\n")
+	if err := os.WriteFile(path, initial, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key := "abc:def#ghi"
+	err := WriteAgentFile(path, config.Agent{
+		RelayAddr:       "wss://relay.example/agent",
+		RegistrationKey: key,
+		Name:            "my-pc",
+		LocalSSHAddr:    "127.0.0.1:22",
+		IdleTimeout:     90 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	for _, want := range []string{key, "127.0.0.1:9", "ws://127.0.0.1:9/client", "my-pc", "90s", "Do not commit"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in\n%s", want, text)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		st, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o600 {
+			t.Fatalf("mode %o", st.Mode().Perm())
+		}
+		dst, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dst.Mode().Perm() != 0o700 {
+			t.Fatalf("dir mode %o", dst.Mode().Perm())
+		}
+	}
+	isolateConfigEnv(t)
+	t.Setenv("REGISTRATION_KEY", "")
+	t.Setenv("RELAY_ADDR", "")
+	t.Setenv("AGENT_NAME", "")
+	t.Setenv("LOCAL_SSH_ADDR", "")
+	t.Setenv("IDLE_TIMEOUT", "")
+	loaded, err := config.LoadAgent(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.RegistrationKey != key || loaded.Name != "my-pc" || loaded.IdleTimeout != 90*time.Second {
+		t.Fatalf("%+v", loaded)
+	}
+}
+
+func TestParseServiceCommand(t *testing.T) {
+	bin, cfg := parseServiceCommand(`"C:\Program Files\kite\kite-agent.exe" --config C:\ProgramData\kite\config.yaml`)
+	if bin != `C:\Program Files\kite\kite-agent.exe` || cfg != `C:\ProgramData\kite\config.yaml` {
+		t.Fatalf("%q %q", bin, cfg)
+	}
+	bin, cfg = parseServiceCommand(`"C:\Program Files\kite\kite-agent.exe" --config "D:\My Data\config.yaml"`)
+	if bin != `C:\Program Files\kite\kite-agent.exe` || cfg != `D:\My Data\config.yaml` {
+		t.Fatalf("%q %q", bin, cfg)
+	}
+	bin, cfg = parseServiceCommand(`C:\kite\kite-agent.exe --config=C:\kite\config.yaml`)
+	if bin != `C:\kite\kite-agent.exe` || cfg != `C:\kite\config.yaml` {
+		t.Fatalf("%q %q", bin, cfg)
+	}
+}
+
+func TestFormatStatus(t *testing.T) {
+	got := FormatStatus(StatusInfo{})
+	if !strings.Contains(got, "Installed: no") || !strings.Contains(got, "kite-agent install") {
+		t.Fatal(got)
+	}
+	if strings.Contains(got, "registration_key") {
+		t.Fatal(got)
+	}
+	got = FormatStatus(StatusInfo{
+		Installed: true,
+		State:     "running",
+		StartType: "automatic (delayed)",
+		Account:   "LocalSystem",
+		Binary:    `C:\Program Files\kite\kite-agent.exe`,
+		Config:    `C:\ProgramData\kite\config.yaml`,
+		Log:       `C:\ProgramData\kite\kite-agent.log`,
+		PID:       42,
+	})
+	for _, want := range []string{"State: running", "automatic (delayed)", "LocalSystem", "PID: 42", "no console window", `config.yaml`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in\n%s", want, got)
+		}
+	}
+}
+
+func TestRejectPlaceholderAndProfile(t *testing.T) {
+	if err := rejectPlaceholderRelay("wss://tunnel.example.com/agent"); err == nil {
+		t.Fatal("expected placeholder rejection")
+	}
+	if err := rejectPlaceholderRelay("wss://relay.example/agent"); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	if !pathInUserProfile(filepath.Join(home, ".config", "kite", "config.yaml")) {
+		t.Fatal("expected profile path")
+	}
+	if pathInUserProfile(filepath.Join(t.TempDir(), "config.yaml")) {
+		t.Fatal("temp path should not count as the profile")
+	}
+	if pathInUserProfile("") {
+		t.Fatal("empty path")
+	}
+}
+
+func TestControlPlaneOffWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("service control is implemented on Windows")
+	}
+	in, err := RunningAsService()
+	if err != nil || in {
+		t.Fatalf("in=%v err=%v", in, err)
+	}
+	for name, err := range map[string]error{
+		"install":   Install(Options{}),
+		"uninstall": Uninstall(),
+		"start":     Start(),
+		"stop":      Stop(),
+		"restart":   Restart(),
+		"service":   Serve(nil),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "Windows") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		low := strings.ToLower(err.Error())
+		if !strings.Contains(low, "systemctl") || !strings.Contains(low, "launchctl") {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(low, "scheduled task") {
+			t.Fatalf("%s should not send operators back to a scheduled task: %v", name, err)
+		}
+	}
+	text, err := Status()
+	if err == nil || text != "" || !strings.Contains(err.Error(), "status") {
+		t.Fatalf("%q %v", text, err)
+	}
+}
+
+func TestOpenLogAppend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kite-agent.log")
+	f, err := OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("one\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	f, err = OpenLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("two\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "one\ntwo\n" {
+		t.Fatalf("%q", b)
+	}
+}
+
+func isolateConfigEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("KITE_CONFIG", "")
+	t.Setenv("ProgramData", t.TempDir())
+}
