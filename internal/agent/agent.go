@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/sshheal"
@@ -103,7 +105,11 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.Users.Set(cfg.SSHUser)
 	}
 	if cfg.EnableHeal && cfg.Heal == nil {
-		cfg.Heal = sshheal.New(sshheal.OS{}, cfg.LocalSSHAddr, cfg.LocalSSHAuto, healthFile(cfg.ConfigPath), cfg.ConfigPath, cfg.logger(), nil)
+		h := sshheal.New(sshheal.OS{}, cfg.LocalSSHAddr, cfg.LocalSSHAuto, healthFile(cfg), cfg.ConfigPath, cfg.logger(), nil)
+		if runtime.GOOS != "windows" && privilegedUser() {
+			h.WithEnvFile(agentctl.UnixEnvFile(cfg.ServiceName))
+		}
+		cfg.Heal = h
 	}
 	if cfg.EnableControl {
 		stop, err := startControl(ctx, cfg)

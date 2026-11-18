@@ -88,6 +88,27 @@ func TestRecoverChangesAutoPort(t *testing.T) {
 	}
 }
 
+func TestRecoverUpdatesEnvFile(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	sys := &fakeSys{running: true, detected: "127.0.0.1:2222"}
+	env := filepath.Join(t.TempDir(), "agent.env")
+	if err := osWrite(env, "LOCAL_SSH_ADDR=127.0.0.1:53257\nLOCAL_SSH_ADDR_AUTO=1\n"); err != nil {
+		t.Fatal(err)
+	}
+	h := New(sys, "127.0.0.1:53257", true, filepath.Join(t.TempDir(), "h.json"), "", nil, func() time.Time { return now })
+	h.WithEnvFile(env)
+	if !h.Recover(context.Background(), errors.New("refused")) {
+		t.Fatal("retry")
+	}
+	body, err := osRead(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strContains(body, "LOCAL_SSH_ADDR=127.0.0.1:2222") || !strContains(body, "LOCAL_SSH_ADDR_AUTO=1") {
+		t.Fatal(body)
+	}
+}
+
 func TestExplicitAddressIsNotRewritten(t *testing.T) {
 	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 	sys := &fakeSys{running: true, detected: "127.0.0.1:2222"}

@@ -18,7 +18,8 @@ import (
 func runConnect(args []string) error {
 	cfg, err := config.LoadClient(config.PeekConfigFlag(args))
 	if err != nil {
-		if !os.IsNotExist(err) {
+		// loadFile wraps the os error, and os.IsNotExist does not unwrap that.
+		if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		cfg = config.Client{}

@@ -94,8 +94,8 @@ type Agent struct {
 	Name            string
 	LocalSSHAddr    string
 	// LocalSSHAuto is true when kite chose LocalSSHAddr by inspecting sshd.
-	// An explicit --local, LOCAL_SSH_ADDR, or a config value without the
-	// auto flag clears it.
+	// An explicit --local, LOCAL_SSH_ADDR without LOCAL_SSH_ADDR_AUTO, or a
+	// config value without the auto flag clears it.
 	LocalSSHAuto  bool
 	LocalExplicit bool
 	IdleTimeout   time.Duration
@@ -212,8 +212,13 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	}
 	if v := os.Getenv("LOCAL_SSH_ADDR"); v != "" {
 		cfg.LocalSSHAddr = v
-		cfg.LocalSSHAuto = false
-		cfg.LocalExplicit = true
+		if envFlag(os.Getenv("LOCAL_SSH_ADDR_AUTO")) {
+			cfg.LocalSSHAuto = true
+			cfg.LocalExplicit = false
+		} else {
+			cfg.LocalSSHAuto = false
+			cfg.LocalExplicit = true
+		}
 	}
 	if v := os.Getenv("SSH_USER"); v != "" {
 		cfg.SSHUser = v
@@ -333,6 +338,58 @@ func FileRelay(path string) string {
 		return val
 	}
 	return ""
+}
+
+func envFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// UpdateEnvLocalSSH rewrites LOCAL_SSH_ADDR in an agent env file and keeps
+// LOCAL_SSH_ADDR_AUTO=1 so a later start still follows sshd. A missing file
+// is left alone.
+func UpdateEnvLocalSSH(path, addr string) error {
+	addr = strings.TrimSpace(addr)
+	if strings.TrimSpace(path) == "" || addr == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	foundAddr := false
+	foundAuto := false
+	for i, line := range lines {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "LOCAL_SSH_ADDR_AUTO=") {
+			lines[i] = "LOCAL_SSH_ADDR_AUTO=1"
+			foundAuto = true
+			continue
+		}
+		if strings.HasPrefix(trim, "LOCAL_SSH_ADDR=") {
+			lines[i] = "LOCAL_SSH_ADDR=" + addr
+			foundAddr = true
+		}
+	}
+	if !foundAddr {
+		lines = append(lines, "LOCAL_SSH_ADDR="+addr)
+	}
+	if !foundAuto {
+		lines = append(lines, "LOCAL_SSH_ADDR_AUTO=1")
+	}
+	body := strings.Join(lines, "\n")
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	return writePrivate(path, []byte(body))
 }
 
 func firstNonEmpty(values ...string) string {

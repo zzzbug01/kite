@@ -18,8 +18,13 @@ func AgentEnvFile(a config.Agent) (string, error) {
 		{"REGISTRATION_KEY", a.RegistrationKey},
 		{"AGENT_NAME", a.Name},
 		{"LOCAL_SSH_ADDR", a.LocalSSHAddr},
-		{"IDLE_TIMEOUT", formatDuration(a.IdleTimeout)},
 	}
+	// Without this, LoadAgent treats LOCAL_SSH_ADDR as an explicit address
+	// and the running agent will not follow a moved sshd port.
+	if a.LocalSSHAuto {
+		rows = append(rows, [2]string{"LOCAL_SSH_ADDR_AUTO", "1"})
+	}
+	rows = append(rows, [2]string{"IDLE_TIMEOUT", formatDuration(a.IdleTimeout)})
 	if strings.TrimSpace(a.SSHUser) != "" {
 		rows = append(rows, [2]string{"SSH_USER", a.SSHUser})
 	}

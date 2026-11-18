@@ -10,12 +10,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/zzzbug01/kite/internal/agent"
-	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/process"
@@ -131,21 +129,9 @@ func run(args []string) error {
 				return err
 			}
 		} else {
-			text = "Service control is the Windows service. On Linux use systemctl; on macOS use launchctl.\n"
+			text = "Instance: " + name + "\nStart and stop this instance with systemctl on Linux or launchctl on macOS.\n"
 		}
-		paths := sshheal.Search()
-		if cfgPath != "" {
-			paths = append([]string{sshheal.File(cfgPath)}, paths...)
-		}
-		if runtime.GOOS == "windows" {
-			if lay, err := agentsvc.DefaultLayout(name); err == nil {
-				paths = append([]string{sshheal.File(lay.ConfigPath)}, paths...)
-			}
-		} else {
-			paths = append([]string{sshheal.File(agentctl.UnixControlPath(name))}, paths...)
-			// Health sits next to the control file's directory.
-			paths = append([]string{filepath.Join(filepath.Dir(agentctl.UnixControlPath(name)), "ssh-health.json")}, paths...)
-		}
+		paths := agentsvc.StatusHealthPaths(name, cfgPath)
 		fmt.Fprint(os.Stdout, text)
 		fmt.Fprintln(os.Stdout, sshheal.LoadFirst(paths).Text())
 		return nil

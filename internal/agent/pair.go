@@ -53,8 +53,11 @@ func (s *session) installAuthorizedKey(req protocol.PairInstall) protocol.PairRe
 	return res
 }
 
-func healthFile(configPath string) string {
-	if p := sshheal.File(configPath); p != "" {
+func healthFile(cfg Config) string {
+	if runtime.GOOS != "windows" && privilegedUser() {
+		return agentctl.UnixHealthPath(cfg.ServiceName)
+	}
+	if p := sshheal.File(cfg.ConfigPath); p != "" {
 		return p
 	}
 	paths := sshheal.Search()
@@ -80,6 +83,9 @@ func startControl(ctx context.Context, cfg Config) (func(), error) {
 }
 
 func defaultControlPath(cfg Config) string {
+	if runtime.GOOS != "windows" && privilegedUser() {
+		return agentctl.UnixControlPath(cfg.ServiceName)
+	}
 	configPath := cfg.ConfigPath
 	if strings.TrimSpace(configPath) != "" {
 		return filepath.Join(filepath.Dir(configPath), "agent-control.json")

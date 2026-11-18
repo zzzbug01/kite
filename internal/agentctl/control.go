@@ -273,6 +273,12 @@ func CandidatePaths(configFlag, serviceName string) []string {
 		}
 		out = append(out, p)
 	}
+	if runtime.GOOS != "windows" {
+		if n, ok := InstanceOfEnv(configFlag); ok {
+			serviceName = n
+			configFlag = ""
+		}
+	}
 	if configFlag != "" {
 		add(filepath.Join(filepath.Dir(configFlag), "agent-control.json"))
 	}
@@ -304,15 +310,69 @@ func CandidatePaths(configFlag, serviceName string) []string {
 	return out
 }
 
-// UnixControlPath is the root agent's control file. It is not under the
-// relay's /var/lib/kite state directory.
-func UnixControlPath(serviceName string) string {
+// UnixStateDir is where one instance keeps its control file and SSH health.
+// The default instance uses /var/lib/kite-agent. Any other name is a subdirectory,
+// never the relay's /var/lib/kite.
+func UnixStateDir(serviceName string) string {
 	dir := "/var/lib/kite-agent"
 	name := strings.TrimSpace(serviceName)
 	if name != "" && !strings.EqualFold(name, "kite-agent") {
 		dir = filepath.Join(dir, name)
 	}
-	return filepath.Join(dir, "agent-control.json")
+	return dir
+}
+
+// UnixControlPath is the instance control file.
+func UnixControlPath(serviceName string) string {
+	return filepath.Join(UnixStateDir(serviceName), "agent-control.json")
+}
+
+// UnixHealthPath is the instance local-SSH health file.
+func UnixHealthPath(serviceName string) string {
+	return filepath.Join(UnixStateDir(serviceName), "ssh-health.json")
+}
+
+// UnixEnvFile is the env file install writes for this instance.
+func UnixEnvFile(serviceName string) string {
+	name := strings.TrimSpace(serviceName)
+	if name == "" || strings.EqualFold(name, "kite-agent") {
+		return "/etc/kite/agent.env"
+	}
+	return filepath.Join("/etc/kite", name, "agent.env")
+}
+
+// UnixBinary is the installed executable. The default stays on PATH.
+// Another instance has its own binary so upgrading one does not replace the others.
+func UnixBinary(serviceName string) string {
+	name := strings.TrimSpace(serviceName)
+	if name == "" || strings.EqualFold(name, "kite-agent") {
+		return "/usr/local/bin/kite-agent"
+	}
+	return filepath.Join("/usr/local/lib/kite", name, "kite-agent")
+}
+
+// InstanceOfEnv reports the instance name stored in an install env path.
+// /etc/kite/agent.env is the default. /etc/kite/<name>/agent.env is that name.
+func InstanceOfEnv(path string) (string, bool) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" {
+		return "", false
+	}
+	if path == "/etc/kite/agent.env" {
+		return "kite-agent", true
+	}
+	if filepath.Base(path) != "agent.env" {
+		return "", false
+	}
+	dir := filepath.Dir(path)
+	if filepath.Dir(dir) != "/etc/kite" {
+		return "", false
+	}
+	name := filepath.Base(dir)
+	if name == "" || name == "kite-agent" || name == "." || name == ".." {
+		return "", false
+	}
+	return name, true
 }
 
 func same(a, b string) bool {

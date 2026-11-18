@@ -491,6 +491,83 @@ func TestListUnsupportedOffWindows(t *testing.T) {
 	}
 }
 
+func TestStatusHealthFollowsConfigInstance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	got := StatusHealthPaths("kite-agent", "/etc/kite/kite-agent-test2/agent.env")
+	if len(got) != 1 || got[0] != "/var/lib/kite-agent/kite-agent-test2/ssh-health.json" {
+		t.Fatal(got)
+	}
+	custom := StatusHealthPaths("kite-agent", "/tmp/other/config.yaml")
+	if len(custom) != 1 || custom[0] != "/tmp/other/ssh-health.json" {
+		t.Fatal(custom)
+	}
+	named := StatusHealthPaths("kite-agent-test2", "")
+	if len(named) != 1 || named[0] != "/var/lib/kite-agent/kite-agent-test2/ssh-health.json" {
+		t.Fatal(named)
+	}
+}
+
+func TestInstallHelpIsNotWindowsOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	isolateConfigEnv(t)
+	t.Setenv("RELAY_ADDR", "ws://127.0.0.1:8080/agent")
+	t.Setenv("REGISTRATION_KEY", "test-key-value")
+	t.Setenv("AGENT_NAME", "my-pc")
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	_, parseErr := ParseOptions([]string{"-h"}, true)
+	w.Close()
+	os.Stderr = old
+	body, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) {
+		t.Fatal(parseErr)
+	}
+	text := string(body)
+	if strings.Contains(text, "Register the Windows service") {
+		t.Fatal(text)
+	}
+	for _, want := range []string{"/usr/local/bin/kite-agent", "/usr/local/lib/kite/<name>/kite-agent", "/var/lib/kite-agent/<name>", "LOCAL_SSH_ADDR_AUTO=1"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q\n%s", want, text)
+		}
+	}
+	r, w, err = os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	_, _, parseErr = ParseControlOptions("status", []string{"-h"})
+	w.Close()
+	os.Stderr = old
+	body, err = io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(parseErr, flag.ErrHelp) {
+		t.Fatal(parseErr)
+	}
+	text = string(body)
+	if strings.Contains(text, "Acts on one Windows service") {
+		t.Fatal(text)
+	}
+	if !strings.Contains(text, "/etc/kite/<name>/agent.env") || !strings.Contains(text, "systemctl") {
+		t.Fatal(text)
+	}
+}
+
 func TestParseControlServiceName(t *testing.T) {
 	name, err := ParseControl("status", []string{"--service-name", "kite-agent-test"})
 	if err != nil {

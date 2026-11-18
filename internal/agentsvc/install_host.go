@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"github.com/zzzbug01/kite/internal/agentctl"
 )
 
 // unixPaths is one Linux or macOS instance. The default name keeps the
@@ -30,22 +32,22 @@ func unixLayout(name string) unixPaths {
 	if name == "" || name == ServiceName {
 		return unixPaths{
 			name:     ServiceName,
-			bin:      "/usr/local/bin/kite-agent",
-			env:      "/etc/kite/agent.env",
+			bin:      agentctl.UnixBinary(ServiceName),
+			env:      agentctl.UnixEnvFile(ServiceName),
 			unitName: ServiceName,
 			unitPath: "/etc/systemd/system/kite-agent.service",
-			state:    "/var/lib/kite-agent",
+			state:    agentctl.UnixStateDir(ServiceName),
 			plist:    "/Library/LaunchDaemons/com.kite.agent.plist",
 			label:    "com.kite.agent",
 		}
 	}
 	return unixPaths{
 		name:     name,
-		bin:      "/usr/local/bin/kite-agent",
-		env:      filepath.Join("/etc/kite", name, "agent.env"),
+		bin:      agentctl.UnixBinary(name),
+		env:      agentctl.UnixEnvFile(name),
 		unitName: name,
 		unitPath: filepath.Join("/etc/systemd/system", name+".service"),
-		state:    filepath.Join("/var/lib/kite-agent", name),
+		state:    agentctl.UnixStateDir(name),
 		plist:    filepath.Join("/Library/LaunchDaemons", "com.kite."+name+".plist"),
 		label:    "com.kite." + name,
 	}

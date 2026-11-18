@@ -15,8 +15,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/protocol"
+	"github.com/zzzbug01/kite/internal/sshheal"
 )
 
 const (
@@ -196,7 +198,7 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	var installDir string
 	var serviceName string
 	var skipSSH bool
-	fs.StringVar(&serviceName, "service-name", "", "Windows service name (default kite-agent). Another name gets its own exe, config, and log")
+	fs.StringVar(&serviceName, "service-name", "", "instance name (default kite-agent). Another name gets its own program, config, and state")
 	fs.StringVar(&cfg.SSHUser, "ssh-user", cfg.SSHUser, "local account that receives paired SSH keys (env SSH_USER)")
 	if install {
 		fs.StringVar(&installDir, "install-dir", "", `directory for kite-agent.exe (default %ProgramFiles%\kite, or %ProgramFiles%\kite\<service-name>)`)
@@ -205,11 +207,26 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	fs.Usage = func() {
 		if install {
 			fmt.Fprintf(fs.Output(), "Usage: kite-agent install [flags]\n\n")
-			fmt.Fprintf(fs.Output(), "Register the Windows service and start it. Requires an elevated\n")
-			fmt.Fprintf(fs.Output(), "Administrator prompt. The registration key is written to\n")
-			fmt.Fprintf(fs.Output(), "%%ProgramData%%\\kite\\config.yaml (or --config) and is not placed\n")
-			fmt.Fprintf(fs.Output(), "on the service command line. Do not commit that file.\n")
-			fmt.Fprintf(fs.Output(), "--service-name installs a second instance and does not replace kite-agent.\n\n")
+			switch runtime.GOOS {
+			case "windows":
+				fmt.Fprintf(fs.Output(), "Register the Windows service and start it. Requires an elevated\n")
+				fmt.Fprintf(fs.Output(), "Administrator prompt. The registration key is written to\n")
+				fmt.Fprintf(fs.Output(), "%%ProgramData%%\\kite\\config.yaml (or --config) and is not placed\n")
+				fmt.Fprintf(fs.Output(), "on the service command line. Do not commit that file.\n")
+				fmt.Fprintf(fs.Output(), "--service-name installs a second instance and does not replace kite-agent.\n\n")
+			case "darwin":
+				fmt.Fprintf(fs.Output(), "Install the launchd daemon and start it. Requires root.\n")
+				fmt.Fprintf(fs.Output(), "The default binary is /usr/local/bin/kite-agent and the env file is /etc/kite/agent.env.\n")
+				fmt.Fprintf(fs.Output(), "--service-name installs another instance at /usr/local/lib/kite/<name>/kite-agent\n")
+				fmt.Fprintf(fs.Output(), "with /etc/kite/<name>/agent.env and state in /var/lib/kite-agent/<name>.\n")
+				fmt.Fprintf(fs.Output(), "An auto-detected address is stored as LOCAL_SSH_ADDR_AUTO=1 so the agent can follow sshd.\n\n")
+			default:
+				fmt.Fprintf(fs.Output(), "Install the systemd unit and start it. Requires root.\n")
+				fmt.Fprintf(fs.Output(), "The default binary is /usr/local/bin/kite-agent and the env file is /etc/kite/agent.env.\n")
+				fmt.Fprintf(fs.Output(), "--service-name installs another instance at /usr/local/lib/kite/<name>/kite-agent\n")
+				fmt.Fprintf(fs.Output(), "with its own unit, /etc/kite/<name>/agent.env, and state in /var/lib/kite-agent/<name>.\n")
+				fmt.Fprintf(fs.Output(), "An auto-detected address is stored as LOCAL_SSH_ADDR_AUTO=1 so the agent can follow sshd.\n\n")
+			}
 		} else {
 			fmt.Fprintf(fs.Output(), "Usage: kite-agent [flags]\n\n")
 			fmt.Fprintf(fs.Output(), "Dials the relay and forwards incoming streams only to LOCAL_SSH_ADDR\n")
@@ -254,7 +271,77 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	if !protocol.ValidName(cfg.Name) {
 		return Options{}, errors.New("AGENT_NAME is required and must not contain whitespace")
 	}
+	if strings.TrimSpace(serviceName) == "" {
+		if n, ok := InstanceFromConfig(configPath); ok {
+			canon = n
+		}
+	}
 	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir, ServiceName: canon, SkipSSHSetup: skipSSH}, nil
+}
+
+// InstanceFromConfig reports the instance whose install path this is.
+// A path that is not one of those layouts returns ok false.
+func InstanceFromConfig(path string) (string, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", false
+	}
+	if runtime.GOOS != "windows" {
+		return agentctl.InstanceOfEnv(path)
+	}
+	clean := filepath.Clean(path)
+	if def, err := DefaultLayout(ServiceName); err == nil && pathsEqual(clean, def.ConfigPath) {
+		return ServiceName, true
+	}
+	if !strings.EqualFold(filepath.Base(clean), "config.yaml") {
+		return "", false
+	}
+	name := filepath.Base(filepath.Dir(clean))
+	canon, err := CanonicalServiceName(name)
+	if err != nil || canon == ServiceName {
+		return "", false
+	}
+	lay, err := DefaultLayout(canon)
+	if err != nil || !pathsEqual(clean, lay.ConfigPath) {
+		return "", false
+	}
+	return canon, true
+}
+
+func pathsEqual(a, b string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+// StatusHealthPaths are the local-SSH health files for this status request,
+// most specific first. --config selects its instance and does not fall through
+// to a different instance's file.
+func StatusHealthPaths(serviceName, configPath string) []string {
+	name := serviceName
+	if name == "" {
+		name = ServiceName
+	}
+	if strings.TrimSpace(configPath) != "" {
+		if resolved, ok := InstanceFromConfig(configPath); ok {
+			name = resolved
+		} else {
+			return []string{sshheal.File(configPath)}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		lay, err := DefaultLayout(name)
+		if err != nil {
+			return nil
+		}
+		return []string{sshheal.File(lay.ConfigPath)}
+	}
+	path := agentctl.UnixHealthPath(name)
+	if name == ServiceName {
+		return []string{path, "/var/lib/kite/ssh-health.json"}
+	}
+	return []string{path}
 }
 
 // ParseControl reads --service-name for status, start, stop, restart, and uninstall.
@@ -274,8 +361,15 @@ func ParseControlOptions(command string, args []string) (name, configPath string
 	fs.StringVar(&configPath, "config", configPath, "config file for this instance (health is stored beside it)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: kite-agent %s [--service-name name] [--config path]\n\n", command)
-		fmt.Fprintf(fs.Output(), "On Windows this acts on one service. On Linux and macOS, status\n")
-		fmt.Fprintf(fs.Output(), "uses --service-name and --config to find that instance's local SSH health.\n\n")
+		if runtime.GOOS == "windows" {
+			fmt.Fprintf(fs.Output(), "Acts on one Windows service. --config selects that instance's files\n")
+			fmt.Fprintf(fs.Output(), "when the path is the one install wrote for it.\n\n")
+		} else {
+			fmt.Fprintf(fs.Output(), "Shows that instance's local SSH health. --config /etc/kite/<name>/agent.env\n")
+			fmt.Fprintf(fs.Output(), "selects that instance, not the default. Health is stored in\n")
+			fmt.Fprintf(fs.Output(), "/var/lib/kite-agent or /var/lib/kite-agent/<name>.\n")
+			fmt.Fprintf(fs.Output(), "Start and stop use systemctl on Linux or launchctl on macOS.\n\n")
+		}
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

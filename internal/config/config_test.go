@@ -149,6 +149,56 @@ func TestConfigSearchSkipsMachinePathOffWindows(t *testing.T) {
 	}
 }
 
+func TestLocalSSHAutoSurvivesEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("KITE_CONFIG", "")
+	t.Setenv("RELAY_ADDR", "")
+	t.Setenv("REGISTRATION_KEY", "")
+	t.Setenv("AGENT_NAME", "")
+	t.Setenv("LOCAL_SSH_ADDR", "127.0.0.1:53257")
+	t.Setenv("LOCAL_SSH_ADDR_AUTO", "1")
+	cfg, err := LoadAgent("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalSSHAddr != "127.0.0.1:53257" || !cfg.LocalSSHAuto || cfg.LocalExplicit {
+		t.Fatalf("auto: %+v", cfg)
+	}
+	t.Setenv("LOCAL_SSH_ADDR_AUTO", "")
+	cfg, err = LoadAgent("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalSSHAuto || !cfg.LocalExplicit {
+		t.Fatalf("explicit: %+v", cfg)
+	}
+}
+
+func TestUpdateEnvLocalSSHKeepsAuto(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.env")
+	body := "RELAY_ADDR=wss://tunnel.example.com/agent\nLOCAL_SSH_ADDR=127.0.0.1:53257\nLOCAL_SSH_ADDR_AUTO=1\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateEnvLocalSSH(path, "127.0.0.1:22"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if !strings.Contains(text, "LOCAL_SSH_ADDR=127.0.0.1:22\n") || !strings.Contains(text, "LOCAL_SSH_ADDR_AUTO=1") {
+		t.Fatal(text)
+	}
+	if strings.Contains(text, "53257") {
+		t.Fatal(text)
+	}
+}
+
 func TestFileRelayIgnoresEnv(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "config.yaml")

@@ -70,6 +70,7 @@ type Healer struct {
 	now        func() time.Time
 	healthPath string
 	configPath string
+	envFile    string
 	auto       bool
 
 	mu         sync.Mutex
@@ -97,6 +98,14 @@ func New(sys System, addr string, auto bool, healthPath, configPath string, log 
 		auto:       auto,
 		addr:       addr,
 	}
+}
+
+// WithEnvFile is the agent env file updated when an auto-detected port moves.
+func (h *Healer) WithEnvFile(path string) *Healer {
+	if h != nil {
+		h.envFile = path
+	}
+	return h
 }
 
 // WithEvery overrides the throttle. Tests use this.
@@ -177,6 +186,11 @@ func (h *Healer) Recover(ctx context.Context, dialErr error) (retry bool) {
 			h.mu.Unlock()
 			if h.configPath != "" {
 				if err := config.SetLocalSSH(h.configPath, detected, true); err != nil {
+					h.log.Info("local ssh: could not store the new address", "err", err)
+				}
+			}
+			if h.envFile != "" {
+				if err := config.UpdateEnvLocalSSH(h.envFile, detected); err != nil {
 					h.log.Info("local ssh: could not store the new address", "err", err)
 				}
 			}

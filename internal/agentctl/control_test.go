@@ -107,6 +107,45 @@ func TestPairResponseIncludesRelay(t *testing.T) {
 	}
 }
 
+func TestUnixInstancePaths(t *testing.T) {
+	if UnixBinary("") != "/usr/local/bin/kite-agent" || UnixBinary("kite-agent") != "/usr/local/bin/kite-agent" {
+		t.Fatal(UnixBinary("kite-agent"))
+	}
+	if UnixBinary("kite-agent-test2") != "/usr/local/lib/kite/kite-agent-test2/kite-agent" {
+		t.Fatal(UnixBinary("kite-agent-test2"))
+	}
+	if UnixHealthPath("kite-agent") != "/var/lib/kite-agent/ssh-health.json" {
+		t.Fatal(UnixHealthPath("kite-agent"))
+	}
+	if UnixHealthPath("kite-agent-test2") != "/var/lib/kite-agent/kite-agent-test2/ssh-health.json" {
+		t.Fatal(UnixHealthPath("kite-agent-test2"))
+	}
+	if UnixEnvFile("kite-agent-test2") != "/etc/kite/kite-agent-test2/agent.env" {
+		t.Fatal(UnixEnvFile("kite-agent-test2"))
+	}
+	name, ok := InstanceOfEnv("/etc/kite/kite-agent-test2/agent.env")
+	if !ok || name != "kite-agent-test2" {
+		t.Fatal(name, ok)
+	}
+	name, ok = InstanceOfEnv("/etc/kite/agent.env")
+	if !ok || name != "kite-agent" {
+		t.Fatal(name, ok)
+	}
+	if _, ok := InstanceOfEnv("/tmp/config.yaml"); ok {
+		t.Fatal("custom config is not an instance env")
+	}
+}
+
+func TestConfigSelectsInstanceControl(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	paths := CandidatePaths("/etc/kite/kite-agent-test2/agent.env", "kite-agent")
+	if len(paths) == 0 || paths[0] != "/var/lib/kite-agent/kite-agent-test2/agent-control.json" {
+		t.Fatal(paths)
+	}
+}
+
 func TestNamedInstanceControlPathComesFirst(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip()

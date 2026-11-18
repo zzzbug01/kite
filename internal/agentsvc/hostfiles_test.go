@@ -27,8 +27,50 @@ func TestAgentEnvFile(t *testing.T) {
 			t.Fatalf("missing %s\n%s", want, body)
 		}
 	}
+	if strings.Contains(body, "LOCAL_SSH_ADDR_AUTO") {
+		t.Fatal("explicit address was marked auto")
+	}
 	if _, err := AgentEnvFile(config.Agent{RegistrationKey: "bad\nkey"}); err == nil {
 		t.Fatal("newline should be rejected")
+	}
+}
+
+func TestAgentEnvFileKeepsAuto(t *testing.T) {
+	body, err := AgentEnvFile(config.Agent{
+		RelayAddr:       "wss://tunnel.example.com/agent",
+		RegistrationKey: "test-key",
+		Name:            "my-pc",
+		LocalSSHAddr:    "127.0.0.1:53257",
+		LocalSSHAuto:    true,
+		IdleTimeout:     90 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, "LOCAL_SSH_ADDR=127.0.0.1:53257") || !strings.Contains(body, "LOCAL_SSH_ADDR_AUTO=1") {
+		t.Fatal(body)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(body, "\n") {
+		key, val, ok := strings.Cut(line, "=")
+		if !ok || strings.HasPrefix(key, "#") {
+			continue
+		}
+		t.Setenv(key, val)
+	}
+	t.Setenv("KITE_CONFIG", "")
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "empty"))
+	cfg, err := config.LoadAgent("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LocalSSHAddr != "127.0.0.1:53257" || !cfg.LocalSSHAuto || cfg.LocalExplicit {
+		t.Fatalf("%+v", cfg)
 	}
 }
 
