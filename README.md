@@ -170,6 +170,8 @@ ssh my-pc
 
 Release tags `v*` build static binaries for `linux/amd64`, `linux/arm64`, `windows/amd64`, `darwin/amd64`, and `darwin/arm64`. Grab them from the [GitHub Releases](https://github.com/zzzbug01/kite/releases) page. Linux and macOS archives are `.tar.gz`. Windows is `.zip` and also contains `WINDOWS.txt` plus `install-kite-agent.ps1`. `kite-agent.exe install` is enough to register the service. `SHA256SUMS` lists every file.
 
+A pull request, and any push to a branch other than `main`, also uploads those builds on the `ci` workflow run. They are kept for 14 days and are not a GitHub Release. Open the run from the commit's checks and download the artifact whose name ends with that commit's short SHA, for example `kite-windows-amd64-5e5ec23`. The Windows artifact is the release zip layout: `kite.exe`, `kite-agent.exe`, `kite-relay.exe`, `WINDOWS.txt`, and `install-kite-agent.ps1`. `kite-agent.exe --version` prints the same short SHA. Linux and macOS artifacts are the `.tar.gz` for that commit.
+
 ```sh
 tar -xzf kite_v0.1.0_linux_amd64.tar.gz
 sudo install -m 755 kite kite-agent kite-relay /usr/local/bin
@@ -387,6 +389,8 @@ ssh my-pc
 ## 下载
 
 标签 `v*` 会为 `linux/amd64`、`linux/arm64`、`windows/amd64`、`darwin/amd64`、`darwin/arm64` 打静态二进制。从 [GitHub Releases](https://github.com/zzzbug01/kite/releases) 下载。Linux 和 macOS 是 `.tar.gz`，Windows 是 `.zip`，里面还有 `WINDOWS.txt` 和 `install-kite-agent.ps1`。注册服务只需要 `kite-agent.exe install`。`SHA256SUMS` 列出全部文件。
+
+拉取请求，以及推送到 `main` 以外分支的提交，也会在 `ci` 工作流里上传这些构建。它们保留 14 天，不是 GitHub Release。从该提交的检查项打开这次运行，下载名称以该提交短 SHA 结尾的产物，例如 `kite-windows-amd64-5e5ec23`。Windows 产物和发布用的 zip 内容一样：`kite.exe`、`kite-agent.exe`、`kite-relay.exe`、`WINDOWS.txt` 和 `install-kite-agent.ps1`。`kite-agent.exe --version` 打印同一个短 SHA。Linux 和 macOS 产物是该提交的 `.tar.gz`。
 
 ```sh
 tar -xzf kite_v0.1.0_linux_amd64.tar.gz

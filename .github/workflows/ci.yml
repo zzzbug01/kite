@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   test:
@@ -34,3 +35,81 @@ jobs:
           go build -o /tmp/kite-agent.exe ./cmd/kite-agent
           go build -o /tmp/kite-relay.exe ./cmd/kite-relay
           go test -c -o /tmp/agentsvc.test.exe ./internal/agentsvc/
+
+  # Pre-merge packages. Tag pushes still publish only through release.yml,
+  # which marks hyphenated tags as GitHub prereleases.
+  packages:
+    name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref != 'refs/heads/main')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build and package
+        id: build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            full="${{ github.event.pull_request.head.sha }}"
+          else
+            full="${GITHUB_SHA}"
+          fi
+          short="${full:0:7}"
+          echo "short=${short}" >> "$GITHUB_OUTPUT"
+          ext=""
+          if [ "${GOOS}" = "windows" ]; then
+            ext=".exe"
+          fi
+          stage="$(mktemp -d)"
+          for cmd in kite kite-agent kite-relay; do
+            go build -trimpath \
+              -ldflags "-s -w -X github.com/zzzbug01/kite/internal/version.Version=${short}" \
+              -o "${stage}/${cmd}${ext}" "./cmd/${cmd}"
+          done
+          mkdir -p dist
+          if [ "${GOOS}" = "windows" ]; then
+            # Same files as the release zip, at the artifact root, so the
+            # download from the Actions run installs the same way.
+            cp "${GITHUB_WORKSPACE}/deploy/WINDOWS.txt" "${stage}/WINDOWS.txt"
+            cp "${GITHUB_WORKSPACE}/deploy/install-kite-agent.ps1" "${stage}/install-kite-agent.ps1"
+            mkdir -p dist/windows
+            cp "${stage}/kite.exe" "${stage}/kite-agent.exe" "${stage}/kite-relay.exe" \
+              "${stage}/WINDOWS.txt" "${stage}/install-kite-agent.ps1" dist/windows/
+          else
+            archive="kite_${short}_${GOOS}_${GOARCH}.tar.gz"
+            tar -C "${stage}" -czf "dist/${archive}" kite kite-agent kite-relay
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kite-${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.build.outputs.short }}
+          path: ${{ matrix.goos == 'windows' && 'dist/windows/*' || format('dist/kite_{0}_{1}_{2}.tar.gz', steps.build.outputs.short, matrix.goos, matrix.goarch) }}
+          retention-days: 14
+          if-no-files-found: error
