@@ -39,13 +39,13 @@ The usual deployment is plain WebSocket on `127.0.0.1:8080`, with nginx or Caddy
 
 One WebSocket per agent carries many SSH streams. Each frame is a 5-byte header (1-byte type, 4-byte big-endian stream id) plus a payload of at most 256 KiB. An agent connection holds at most 64 streams. Ping (type 10) and pong (type 11) are exchanged every 20 seconds. A connection with no received frames for `IDLE_TIMEOUT` (default 90s) is dropped. Those application heartbeats, not TCP keepalives, are what keep an idle tunnel open through a reverse proxy.
 
-Agents and clients present one shared `REGISTRATION_KEY`. The relay compares it in constant time and rejects anything else. A newer agent with the same name replaces the previous connection.
+Agents present one shared `REGISTRATION_KEY`. Clients may present that same key, or a per-client token from `kite connect`. The relay compares registration keys in constant time and stores only a hash of each client token. A newer agent with the same name replaces the previous connection. Pairing uses two extra frame types (12 and 13) on the agent connection. A peer that does not know them ignores the frame and the other side reports that pairing is unsupported.
 
 The agent dials only its configured `LOCAL_SSH_ADDR` (default `127.0.0.1:22`). Open frames do not carry an address. The relay cannot point the agent at another host.
 
 ## Secrets
 
-Set `REGISTRATION_KEY` and `RELAY_ADDR` with environment variables, or with a config file that stays out of git (`~/.config/kite/config.yaml`, or `--config` / `KITE_CONFIG` pointing at a gitignored file). Never commit them.
+Set `REGISTRATION_KEY` and `RELAY_ADDR` with environment variables, or with a config file that stays out of git (`~/.config/kite/config.yaml`, or `--config` / `KITE_CONFIG` pointing at a gitignored file). Never commit them. A paired laptop stores its client token in that same file and its private key in `~/.ssh/kite_<agent>`. The pairing code is short-lived and is not a credential you keep.
 
 Do not commit real registration keys, real domains, public IPs, TLS certificates, or private keys. The files in this repository use placeholders (`CHANGE_ME`, `tunnel.example.com`). kite refuses to start while the key is still `CHANGE_ME`.
 
@@ -57,20 +57,22 @@ Copy `config.example.yaml` if you want a file. Environment variables override th
 
 ## Quick start
 
-Build (or download a release, below):
+Build, or download a release (below):
 
 ```sh
 make all
 # bin/kite  bin/kite-agent  bin/kite-relay
 ```
 
-### Relay
+The path is: install the relay, run `kite-agent install` on the computer you want to reach (it sets up sshd), run `kite-agent pair` there, run `kite connect CODE` on the laptop, then `ssh <name>`.
 
-On the VPS, install `kite-relay` to `/usr/local/bin` and create `/etc/kite/relay.env` from `deploy/relay.env.example`. Put a long random `REGISTRATION_KEY` in that file and `chmod 600` it.
+### 1. Relay
+
+On the VPS, install `kite-relay` and create `/etc/kite/relay.env` from `deploy/relay.env.example`. Put a long random `REGISTRATION_KEY` in that file and `chmod 600` it. `STATE_DIR` defaults to `/var/lib/kite` (hashed client tokens). The unit's `StateDirectory=kite` creates that directory.
 
 ```sh
 sudo install -m 755 bin/kite-relay /usr/local/bin/kite-relay
-sudo install -d -m 700 /etc/kite
+sudo install -d -m 700 /etc/kite /var/lib/kite
 sudo cp deploy/relay.env.example /etc/kite/relay.env
 sudoedit /etc/kite/relay.env
 sudo cp deploy/kite-relay.service /etc/systemd/system/kite-relay.service
@@ -78,18 +80,95 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now kite-relay
 ```
 
-Default listen address is `127.0.0.1:8080` with no TLS. Put nginx or Caddy in front:
+Default listen address is `127.0.0.1:8080` with no TLS. Put nginx or Caddy in front so `/agent`, `/client`, `/pair`, and `/pair/redeem` all reach kite-relay:
 
 - `deploy/nginx-kite.conf` passes through the WebSocket upgrade (`Upgrade` and `Connection`, `proxy_http_version 1.1`), sets `proxy_buffering off`, and uses 24 hour `proxy_read_timeout` / `proxy_send_timeout`.
 - `deploy/Caddyfile` uses `reverse_proxy` with `flush_interval -1` and the same long timeouts.
 
-The 20 second application heartbeat keeps otherwise idle SSH sessions from being cut by those proxies. `GET /healthz` returns `ok` for a local check.
+`GET /healthz` returns `ok`. Leave `TLS_CERT_FILE` and `TLS_KEY_FILE` unset when a proxy does TLS.
 
-To terminate TLS inside kite-relay instead, set both `TLS_CERT_FILE` and `TLS_KEY_FILE`. Leave them unset when a proxy does TLS.
+### 2. Controlled machine
 
-### Agent
+Set the relay URL, the registration key, and a name, then install. `install` checks the local SSH server and fixes it. The agent dials `127.0.0.1:22` only, so install does not add a firewall rule for port 22.
 
-`AGENT_NAME` must match the `Host` alias you will use in SSH config. The agent never dials anywhere except `LOCAL_SSH_ADDR`.
+```sh
+export RELAY_ADDR="wss://tunnel.example.com/agent"
+export REGISTRATION_KEY="CHANGE_ME"   # replace; install refuses this placeholder
+export AGENT_NAME="my-pc"
+export SSH_USER="me"                  # account that should accept the SSH key
+sudo -E kite-agent install
+kite-agent pair
+```
+
+`pair` prints a one-time code such as `ABCD-EFGH` (10 minutes). It is not the registration key. The installing user can run `pair` without a further elevation prompt when the service is running and the control file is readable. If it is not, `sudo kite-agent pair` uses the registration key from the environment. The agent must be connected to the relay.
+
+What `install` does to sshd, and does again if you re-run it:
+
+- Windows (elevated): if OpenSSH Server is missing, `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`. `sshd` is set to startup type Automatic and started. A Manual sshd comes up after reboot as stopped, so the tunnel connects and `127.0.0.1:22` is refused. Install always sets Automatic.
+- Linux: if `openssh-server` is missing, root runs the distro command (`apt-get install -y openssh-server`, `dnf install -y openssh-server`, `pacman -S --noconfirm openssh`, or `apk add openssh`) and enables the service (`ssh` on Debian/Ubuntu, `sshd` elsewhere). Without root, the same command is printed.
+- macOS: if Remote Login is off, root runs `systemsetup -setremotelogin on`. Without root, that command is printed with `sudo`.
+
+`kite-agent setup` is the same SSH check without registering the agent. `--skip-ssh-setup` skips it during install.
+
+On Linux, root `install` also writes `/etc/kite/agent.env` (mode 0600), copies the binary to `/usr/local/bin/kite-agent`, and enables `kite-agent.service`. On macOS, root `install` bootstraps a LaunchDaemon that reads `/etc/kite/agent.env`. On Windows, `install` registers the Service Control Manager service described under Manual setup.
+
+### 3. Laptop
+
+The pairing code does not contain the relay address. Pass it once:
+
+```sh
+kite connect --relay wss://tunnel.example.com ABCD-EFGH
+ssh my-pc
+```
+
+`kite connect` generates an ed25519 key on this computer (the private key is never sent), redeems the code, and stores:
+
+- the private key at `~/.ssh/kite_my-pc` (mode 0600)
+- a per-client token in `~/.config/kite/config.yaml` (not the registration key)
+- a `Host my-pc` block in `~/.ssh/config` (`User`, `IdentityFile`, `IdentitiesOnly yes`, `ProxyCommand` with the absolute path to `kite`). An existing file is copied to `config.bak.<timestamp>` first. An existing `Host my-pc` block is left unchanged.
+
+The relay asks the agent, over the agent's existing connection, to append the public key. On Windows, an administrator account uses `C:\ProgramData\ssh\administrators_authorized_keys` (SYSTEM and Administrators only). Any other account uses that user's `~/.ssh/authorized_keys`. Linux and macOS use `~/.ssh/authorized_keys` with mode 0700 on `.ssh` and 0600 on the file. The comment is `kite-pair <label> <date>`.
+
+Then:
+
+```sh
+ssh my-pc exit
+```
+
+`scp`, `sftp`, and `git` over SSH use the same host. The name `connect` is reserved by the `kite` command and cannot be an agent name.
+
+### Revoke and rotate
+
+On the controlled machine, list or remove keys kite added:
+
+```sh
+kite-agent unpair --list
+kite-agent unpair --revoke laptop
+```
+
+On the relay, client tokens are separate from those SSH keys. `kite-relay tokens list` prints id, agent, label, SSH user, and time. It does not print the token. `kite-relay tokens revoke <id-or-label>` drops the token. Do both when retiring a laptop.
+
+To rotate the agent registration key without cutting off paired laptops (they no longer use it):
+
+1. On the relay, set `REGISTRATION_KEY_PREVIOUS` to the current key and `REGISTRATION_KEY` to the new secret. Restart kite-relay. Both keys are accepted.
+2. Put the new key in each agent's config (`SSH_USER` unchanged) and restart kite-agent.
+3. Remove `REGISTRATION_KEY_PREVIOUS` and restart kite-relay.
+
+A relay restart drops outstanding pairing codes. It does not drop client tokens; those live in `STATE_DIR/clients.json` as hashes.
+
+Agents and clients from v0.1.0-rc.2 keep working with `REGISTRATION_KEY`. They do not understand pairing. `kite-agent pair` against an older agent fails with a message to upgrade that agent. An old relay answers `POST /pair` with 404, and `kite connect` says the relay does not support pairing.
+
+## Manual setup
+
+Use this when you want to install the service yourself, or when a laptop should keep using the shared `REGISTRATION_KEY` instead of `kite connect`.
+
+### Relay by hand
+
+The commands in step 1 are the manual relay install. To terminate TLS inside kite-relay, set both `TLS_CERT_FILE` and `TLS_KEY_FILE`.
+
+### Agent by hand
+
+`AGENT_NAME` must match the `Host` alias. The agent never dials anywhere except `LOCAL_SSH_ADDR`.
 
 Linux, with `/etc/kite/agent.env` copied from `deploy/agent.env.example`:
 
@@ -100,79 +179,62 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now kite-agent
 ```
 
-macOS: copy `deploy/agent.env.example` to `~/.config/kite/agent.env` (`chmod 600`), install the binary to `/usr/local/bin/kite-agent`, then:
+macOS user agent: copy `deploy/agent.env.example` to `~/.config/kite/agent.env` (`chmod 600`), install the binary to `/usr/local/bin/kite-agent`, then:
 
 ```sh
 cp deploy/com.kite.agent.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.kite.agent.plist
 ```
 
-The plist has no secrets. It sources `~/.config/kite/agent.env`.
+The plist has no secrets. It sources `~/.config/kite/agent.env`. Do not load that user agent and the root LaunchDaemon at the same time; they would fight over the same agent name.
 
-Windows runs `kite-agent` as a service. It starts at boot, including when nobody is logged on, and it does not open a console window. From an elevated PowerShell (Run as administrator), in the directory that contains `kite-agent.exe`:
+Windows runs `kite-agent` as a service. It starts at boot, including when nobody is logged on, and it does not open a console window. From an elevated PowerShell (Run as administrator):
 
 ```powershell
 $env:RELAY_ADDR = "wss://tunnel.example.com/agent"
 $env:REGISTRATION_KEY = "CHANGE_ME"
 $env:AGENT_NAME = "my-pc"
+$env:SSH_USER = "me"
 .\kite-agent.exe install
 .\kite-agent.exe status
+.\kite-agent.exe pair
 ```
 
-Replace both placeholders before running. `install` refuses `CHANGE_ME` and `tunnel.example.com`.
+Replace the placeholders before running. `install` refuses `CHANGE_ME` and `tunnel.example.com`.
 
-`install` copies the binary to `%ProgramFiles%\kite\kite-agent.exe`, writes `%ProgramData%\kite\config.yaml`, and registers service `kite-agent` as automatic (delayed). The service command line is the executable plus `--config`. The registration key stays in that file. Its ACL grants SYSTEM, Administrators, and the user who ran `install`. LocalSystem does not see your shell environment and does not load a file under `%USERPROFILE%`, so the service reads the file written at install. If a variable is set in the service process itself, it still overrides the file. A normal install does not set service environment variables.
+`install` copies the binary to `%ProgramFiles%\kite\kite-agent.exe`, writes `%ProgramData%\kite\config.yaml`, and registers service `kite-agent` as automatic (delayed). The service command line is the executable plus `--config`. The registration key stays in that file. Its ACL grants SYSTEM, Administrators, and the user who ran `install`. LocalSystem does not see your shell environment. The same ACL lets that user read the control file, so `kite-agent pair` does not need a second elevation prompt while the service is running.
 
 ```powershell
 kite-agent status      # no elevation required
 kite-agent list        # no elevation required; every kite-agent and kite-agent-* service
-kite-agent stop         # elevated
-kite-agent start        # elevated
-kite-agent restart      # elevated
-kite-agent uninstall    # elevated; leaves the config file in place
+kite-agent pair        # no elevation required for the installing user while the service is running
+kite-agent stop        # elevated
+kite-agent start       # elevated
+kite-agent restart     # elevated
+kite-agent uninstall   # elevated; leaves the config file in place
 ```
 
-Logs are `%ProgramData%\kite\kite-agent.log`. `uninstall` does not delete the config file. Delete `%ProgramData%\kite\config.yaml` yourself to remove the registration key.
+Logs are `%ProgramData%\kite\kite-agent.log`. `uninstall` does not delete the config file.
 
-If an older install registered a logon scheduled task named `kite-agent`, `install` of the default service deletes that task and deletes `start-kite-agent.cmd` from the install directory, so login no longer opens a console window. A different `--service-name` does not touch that task or the default service.
-
-A second service can run beside the stable one. Give it its own name, its own `AGENT_NAME` (so the relay does not drop the tunnel you are using), and leave `--install-dir` unset unless you want a custom folder:
+A second service can run beside the stable one. Give it its own `AGENT_NAME`:
 
 ```powershell
-$env:RELAY_ADDR = "wss://tunnel.example.com/agent"
-$env:REGISTRATION_KEY = "CHANGE_ME"
-$env:AGENT_NAME = "my-pc-test"
 .\kite-agent.exe install --service-name kite-agent-test
-.\kite-agent.exe status --service-name kite-agent-test
 ```
 
-That instance is service `kite-agent-test`. Its exe is `%ProgramFiles%\kite\kite-agent-test\kite-agent.exe`, its config is `%ProgramData%\kite\kite-agent-test\config.yaml`, and its log is `%ProgramData%\kite\kite-agent-test\kite-agent.log`. `start`, `stop`, `restart`, and `uninstall` take the same `--service-name` and do not stop `kite-agent`.
-
-`kite-agent list` prints every installed service named `kite-agent` or `kite-agent-*`. It does not need elevation. Each line is tab-separated: service name, agent name from that instance's config, state (`running` or `stopped`), and start type. If the config file cannot be read, the agent name is `-`. The registration key is not printed. If the old logon scheduled task named `kite-agent` still exists, list adds a read-only line `legacy logon task kite-agent: <status>`. On Linux and macOS the command reports that listing Windows services is not supported. `status` hints for a non-default instance include `--service-name`.
-
-To replace the binary of a running instance without relying on the SSH session that came in through it:
+Its files live under `%ProgramFiles%\kite\kite-agent-test\` and `%ProgramData%\kite\kite-agent-test\`. Only the default name removes an old logon scheduled task.
 
 ```powershell
 .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
-.\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe --service-name kite-agent-test
 ```
 
-`upgrade` returns after it has registered a one-shot task that runs as SYSTEM. That task stops the named service, copies the new exe over the installed one, and starts the service. The SSH session can disconnect when the tunnel restarts; the task is not part of that session and still finishes. The result is `%ProgramData%\kite\upgrade.log` for the default service, or `%ProgramData%\kite\<service-name>\upgrade.log` for another instance. The file has paths and errors, not the registration key.
+`upgrade` schedules a one-shot SYSTEM task that swaps the exe even if this SSH session drops. The result is `%ProgramData%\kite\upgrade.log`.
 
-`deploy/install-kite-agent.ps1` is optional. It requires an elevated session and calls `kite-agent install`. It does not register a scheduled task and it does not write a command wrapper.
+`deploy/install-kite-agent.ps1` calls the same `install`. Foreground debugging still opens a console; stop the service first.
 
-Foreground debugging still opens a console. Stop the service first, or the relay keeps only the newer of the two connections:
+### SSH client by hand
 
-```powershell
-kite-agent stop
-kite-agent
-```
-
-To store the config somewhere other than `%ProgramData%\kite\config.yaml`, pass an absolute `--config` path that is not inside a user profile. The service account has to be able to read it. `install` also accepts `--install-dir` (default `%ProgramFiles%\kite`).
-
-### SSH client
-
-OpenSSH does not expand `$VARS` inside `ProxyCommand`. `%n` is the `Host` alias, and it must equal `AGENT_NAME`. `RELAY_ADDR` and `REGISTRATION_KEY` come from the environment of the `ssh` process (for example a shell profile that sources a gitignored `client.env`) or from `~/.config/kite/config.yaml`.
+OpenSSH does not expand `$VARS` inside `ProxyCommand`. `%n` is the `Host` alias and must equal `AGENT_NAME`. A paired laptop does not need this block; `kite connect` writes it. A legacy client still sends `REGISTRATION_KEY`:
 
 ```
 Host my-pc
@@ -187,8 +249,6 @@ set -a
 set +a
 ssh my-pc
 ```
-
-`my-pc` is both the SSH host alias and the agent's `AGENT_NAME`. The same pattern works for `scp`, `sftp`, and `git` over SSH.
 
 ## Download
 
@@ -229,14 +289,17 @@ git push origin v0.1.0-rc.2
 | Variable | Binary | Default |
 | --- | --- | --- |
 | `LISTEN_ADDR` | relay | `127.0.0.1:8080` |
-| `REGISTRATION_KEY` | all | required |
+| `REGISTRATION_KEY` | relay, agent, legacy client | required for the relay and agents |
+| `REGISTRATION_KEY_PREVIOUS` | relay | unset; accepted during rotation |
+| `STATE_DIR` | relay | `/var/lib/kite` |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | relay | unset (plain WS) |
 | `IDLE_TIMEOUT` | all | `90s` |
 | `RELAY_ADDR` | agent, client | required, `ws://` or `wss://` |
 | `AGENT_NAME` | agent | required |
 | `LOCAL_SSH_ADDR` | agent | `127.0.0.1:22` |
+| `SSH_USER` | agent | account that receives paired keys |
 
-Flags: `--listen`, `--registration-key`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite. `kite-agent install` also accepts `--install-dir`.
+Flags: `--listen`, `--registration-key`, `--registration-key-previous`, `--state-dir`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--ssh-user`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite. `kite-agent install` also accepts `--install-dir` and `--skip-ssh-setup`. `kite connect` accepts `--relay` and `--label`. `kite-agent pair` accepts `--ttl` (default 10m, maximum 30m).
 
 On Windows, when no `--config` / `KITE_CONFIG` is set and the user config files are absent, kite-agent also reads `%ProgramData%\kite\config.yaml`. The installed service always passes `--config` so it does not depend on that search.
 
@@ -283,13 +346,13 @@ flowchart LR
 
 每个 agent 一条 WebSocket，上面复用多路 SSH。帧格式是 5 字节头（1 字节类型 + 4 字节大端流编号）再加最多 256 KiB 的载荷。一条 agent 连接最多 64 路。每 20 秒交换一次 ping（类型 10）和 pong（类型 11）。`IDLE_TIMEOUT`（默认 90 秒）内没有收到任何帧就断开。穿过反向代理时，靠的是这个应用层心跳，而不是 TCP keepalive。
 
-agent 和客户端出示同一个 `REGISTRATION_KEY`。中继用常数时间比较，其他值一律拒绝。同名 agent 新连接会替换旧连接。
+agent 出示共享的 `REGISTRATION_KEY`。客户端可以出示同一把密钥，也可以出示 `kite connect` 发的每客户端令牌。中继用常数时间比较注册密钥，客户端令牌只存哈希。同名 agent 新连接会替换旧连接。配对在 agent 连接上多用两种帧（12 和 13）。不认识的一端会忽略这种帧，另一端会说明对方还不支持配对。
 
 agent 只拨自己配置的 `LOCAL_SSH_ADDR`（默认 `127.0.0.1:22`）。打开流的帧里不带地址，中继不能让 agent 去连别的地方。
 
 ## 密钥
 
-`REGISTRATION_KEY` 和 `RELAY_ADDR` 用环境变量设置，或者放在不进 git 的配置文件里（`~/.config/kite/config.yaml`，或 `--config` / `KITE_CONFIG` 指向被 gitignore 的文件）。不要把它们提交进仓库。
+`REGISTRATION_KEY` 和 `RELAY_ADDR` 用环境变量设置，或者放在不进 git 的配置文件里（`~/.config/kite/config.yaml`，或 `--config` / `KITE_CONFIG` 指向被 gitignore 的文件）。不要把它们提交进仓库。配对过的笔记本把客户端令牌放在同一个配置文件里，把私钥放在 `~/.ssh/kite_<agent>`。配对码是短时的，不用保存。
 
 不要提交真实的注册密钥、真实域名、公网 IP、TLS 证书或私钥。仓库里的示例只用占位符（`CHANGE_ME`、`tunnel.example.com`）。密钥如果还是 `CHANGE_ME`，程序会拒绝启动。
 
@@ -308,13 +371,15 @@ make all
 # bin/kite  bin/kite-agent  bin/kite-relay
 ```
 
-### 中继
+顺序是：装好中继，在要被连接的电脑上运行 `kite-agent install`（它会装好 sshd），在那台电脑上运行 `kite-agent pair`，在笔记本上运行 `kite connect 配对码`，然后 `ssh <名字>`。
 
-在 VPS 上把 `kite-relay` 装到 `/usr/local/bin`，用 `deploy/relay.env.example` 生成 `/etc/kite/relay.env`，写入一长串随机 `REGISTRATION_KEY`，并 `chmod 600`。
+### 1. 中继
+
+在 VPS 上安装 `kite-relay`，用 `deploy/relay.env.example` 生成 `/etc/kite/relay.env`，写入一长串随机 `REGISTRATION_KEY`，并 `chmod 600`。`STATE_DIR` 默认是 `/var/lib/kite`（只保存客户端令牌的哈希）。单元里的 `StateDirectory=kite` 会创建这个目录。
 
 ```sh
 sudo install -m 755 bin/kite-relay /usr/local/bin/kite-relay
-sudo install -d -m 700 /etc/kite
+sudo install -d -m 700 /etc/kite /var/lib/kite
 sudo cp deploy/relay.env.example /etc/kite/relay.env
 sudoedit /etc/kite/relay.env
 sudo cp deploy/kite-relay.service /etc/systemd/system/kite-relay.service
@@ -322,18 +387,95 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now kite-relay
 ```
 
-默认监听 `127.0.0.1:8080`，不启用 TLS。前面加 nginx 或 Caddy：
+默认监听 `127.0.0.1:8080`，不启用 TLS。前面加 nginx 或 Caddy，让 `/agent`、`/client`、`/pair` 和 `/pair/redeem` 都转到 kite-relay：
 
-- `deploy/nginx-kite.conf` 透传 WebSocket 升级（`Upgrade` 和 `Connection`，`proxy_http_version 1.1`），关闭 `proxy_buffering`，`proxy_read_timeout` / `proxy_send_timeout` 为 24 小时。
+- `deploy/nginx-kite.conf` 透传 WebSocket 升级（`Upgrade` 和 `Connection`，`proxy_http_version 1.1`），关闭 `proxy_buffering`，读写超时 24 小时。
 - `deploy/Caddyfile` 使用 `reverse_proxy`，`flush_interval -1`，超时同样很长。
 
-20 秒一次的应用层心跳让空闲 SSH 不会被这些代理掐断。`GET /healthz` 返回 `ok`，便于本机检查。
+`GET /healthz` 返回 `ok`。由代理做 TLS 时不要设置 `TLS_CERT_FILE` 和 `TLS_KEY_FILE`。
 
-如果要让 kite-relay 自己终结 TLS，同时设置 `TLS_CERT_FILE` 和 `TLS_KEY_FILE`。由代理做 TLS 时就不要设置它们。
+### 2. 被控电脑
 
-### Agent
+设置中继地址、注册密钥和名字，然后安装。`install` 会检查本机 SSH 并把它修好。agent 只拨 `127.0.0.1:22`，所以不会为 22 端口添加入站防火墙规则。
 
-`AGENT_NAME` 必须和 SSH 配置里的 `Host` 别名一致。agent 除了 `LOCAL_SSH_ADDR` 不会拨其他地址。
+```sh
+export RELAY_ADDR="wss://tunnel.example.com/agent"
+export REGISTRATION_KEY="CHANGE_ME"   # 先换成真实密钥，占位符会被拒绝
+export AGENT_NAME="my-pc"
+export SSH_USER="me"                  # 接受 SSH 公钥的本机账户
+sudo -E kite-agent install
+kite-agent pair
+```
+
+`pair` 打印一次性配对码，例如 `ABCD-EFGH`（10 分钟，用过即废）。它不是注册密钥。服务在跑、而且控制文件对安装者可读时，不需要再提权。否则 `sudo kite-agent pair` 会用环境里的注册密钥向中继要码。agent 必须已经连上中继。
+
+`install` 对 sshd 做的事，再跑一次也一样：
+
+- Windows（提升权限）：没有 OpenSSH Server 就执行 `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`。把 `sshd` 设为自动启动并启动它。启动类型如果是手动，重启后 kite 能连上中继，但 `127.0.0.1:22` 会被拒绝。install 总会把它设成 Automatic。
+- Linux：没有 `openssh-server` 时，root 会按发行版执行安装命令（`apt-get install -y openssh-server`、`dnf install -y openssh-server`、`pacman -S --noconfirm openssh` 或 `apk add openssh`），并 enable 服务（Debian/Ubuntu 是 `ssh`，其它是 `sshd`）。不是 root 就只打印这条命令。
+- macOS：远程登录关着时，root 执行 `systemsetup -setremotelogin on`。不是 root 就打印带 `sudo` 的同一条命令。
+
+`kite-agent setup` 只做 SSH 检查，不注册 agent。`install --skip-ssh-setup` 可以跳过这一步。
+
+在 Linux 上，root 执行的 `install` 还会写入 `/etc/kite/agent.env`（权限 0600），把程序拷到 `/usr/local/bin/kite-agent`，并 enable `kite-agent.service`。在 macOS 上，root 执行的 `install` 会加载一个读取 `/etc/kite/agent.env` 的 LaunchDaemon。在 Windows 上，`install` 注册下面「手动安装」里说的服务。
+
+### 3. 笔记本
+
+配对码里没有中继地址，第一次要带上：
+
+```sh
+kite connect --relay wss://tunnel.example.com ABCD-EFGH
+ssh my-pc
+```
+
+`kite connect` 在这台电脑上生成 ed25519 密钥（私钥不会发出去），兑换配对码，并写入：
+
+- 私钥 `~/.ssh/kite_my-pc`（权限 0600）
+- `~/.config/kite/config.yaml` 里的每客户端令牌（不是注册密钥）
+- `~/.ssh/config` 里的 `Host my-pc`（`User`、`IdentityFile`、`IdentitiesOnly yes`，`ProxyCommand` 用 kite 的绝对路径）。已有文件会先复制成 `config.bak.<时间>`。已经有同名 `Host` 时不会再加一块。
+
+中继通过 agent 现有的连接，让它把公钥追加进去。Windows 上管理员账户写入 `C:\ProgramData\ssh\administrators_authorized_keys`（只给 SYSTEM 和管理员）。其它账户写入该用户的 `~/.ssh/authorized_keys`。Linux 和 macOS 使用 `~/.ssh/authorized_keys`，目录 0700，文件 0600。注释是 `kite-pair <标签> <日期>`。
+
+然后：
+
+```sh
+ssh my-pc exit
+```
+
+`scp`、`sftp` 和走 SSH 的 `git` 用同一个主机名。`connect` 这个名字被 `kite` 命令占用，不能当作 agent 名。
+
+### 撤销和轮换
+
+在被控电脑上列出或删掉 kite 加过的公钥：
+
+```sh
+kite-agent unpair --list
+kite-agent unpair --revoke laptop
+```
+
+中继上的客户端令牌和这些 SSH 公钥是两回事。`kite-relay tokens list` 打印 id、agent、标签、SSH 用户和时间，不打印令牌本身。`kite-relay tokens revoke <id 或标签>` 作废令牌。退役一台笔记本时两步都做。
+
+轮换 agent 的注册密钥时，已经配对的笔记本不再用这把密钥：
+
+1. 在中继上把 `REGISTRATION_KEY_PREVIOUS` 设成当前密钥，把 `REGISTRATION_KEY` 设成新密钥，重启 kite-relay。两把密钥都会被接受。
+2. 把新密钥写进每台 agent 的配置（`SSH_USER` 不用改），重启 kite-agent。
+3. 删掉 `REGISTRATION_KEY_PREVIOUS`，再重启 kite-relay。
+
+中继重启会丢掉还没兑换的配对码，不会丢掉客户端令牌。令牌以哈希形式放在 `STATE_DIR/clients.json`。
+
+v0.1.0-rc.2 的 agent 和客户端继续用 `REGISTRATION_KEY`，它们不会配对。对旧 agent 执行 `kite-agent pair` 会得到明确的升级提示。旧中继对 `POST /pair` 返回 404，`kite connect` 会说明这台中继还不支持配对。
+
+## 手动安装
+
+想自己装服务，或者笔记本继续用共享的 `REGISTRATION_KEY` 而不是 `kite connect` 时，走这里。
+
+### 手动装中继
+
+第 1 步的命令就是手动安装。要让 kite-relay 自己终结 TLS，同时设置 `TLS_CERT_FILE` 和 `TLS_KEY_FILE`。
+
+### 手动装 agent
+
+`AGENT_NAME` 必须和 SSH 的 `Host` 别名一致。agent 除了 `LOCAL_SSH_ADDR` 不会拨其它地址。
 
 Linux：把 `deploy/agent.env.example` 复制为 `/etc/kite/agent.env` 后：
 
@@ -344,79 +486,62 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now kite-agent
 ```
 
-macOS：把 `deploy/agent.env.example` 复制到 `~/.config/kite/agent.env`（`chmod 600`），二进制放到 `/usr/local/bin/kite-agent`，然后：
+macOS 用户代理：把 `deploy/agent.env.example` 复制到 `~/.config/kite/agent.env`（`chmod 600`），二进制放到 `/usr/local/bin/kite-agent`，然后：
 
 ```sh
 cp deploy/com.kite.agent.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.kite.agent.plist
 ```
 
-这个 plist 里没有密钥，它会读取 `~/.config/kite/agent.env`。
+这个 plist 里没有密钥，它会读取 `~/.config/kite/agent.env`。不要同时加载这个用户代理和 root 安装的 LaunchDaemon，两边会抢同一个 agent 名。
 
-Windows 把 `kite-agent` 作为服务运行。开机就会启动，不需要有人登录，也不会弹出控制台窗口。在包含 `kite-agent.exe` 的目录里，用提升权限的 PowerShell（以管理员身份运行）：
+Windows 上 kite-agent 作为服务运行。开机就会启动，不需要有人登录，也不会弹出控制台。在提升权限的 PowerShell 里：
 
 ```powershell
 $env:RELAY_ADDR = "wss://tunnel.example.com/agent"
 $env:REGISTRATION_KEY = "CHANGE_ME"
 $env:AGENT_NAME = "my-pc"
+$env:SSH_USER = "me"
 .\kite-agent.exe install
 .\kite-agent.exe status
+.\kite-agent.exe pair
 ```
 
-运行前换掉两个占位符。`install` 会拒绝 `CHANGE_ME` 和 `tunnel.example.com`。
+运行前换掉占位符。`install` 会拒绝 `CHANGE_ME` 和 `tunnel.example.com`。
 
-`install` 把程序复制到 `%ProgramFiles%\kite\kite-agent.exe`，写入 `%ProgramData%\kite\config.yaml`，并把服务 `kite-agent` 注册为自动（延迟）启动。服务的命令行只有程序路径和 `--config`。注册密钥留在配置文件里，ACL 只给 SYSTEM、Administrators 和执行安装的用户。LocalSystem 看不到当前 shell 的环境变量，也不会加载 `%USERPROFILE%` 下的文件，所以服务读的是安装时写好的那份。如果服务进程自己的环境里有同名变量，仍然会覆盖文件。普通安装不会去设置那些变量。
+`install` 把程序拷到 `%ProgramFiles%\kite\kite-agent.exe`，写入 `%ProgramData%\kite\config.yaml`，并把服务 `kite-agent` 注册为自动（延迟）启动。服务命令行只有程序路径和 `--config`。注册密钥留在那个文件里。ACL 给 SYSTEM、Administrators 和执行 install 的用户。LocalSystem 看不到你的用户环境。同一份 ACL 让这个用户能读控制文件，所以服务在跑时 `kite-agent pair` 不需要再提权。
 
 ```powershell
 kite-agent status      # 不需要提升权限
 kite-agent list        # 不需要提升权限；列出 kite-agent 和 kite-agent-*
-kite-agent stop         # 需要提升权限
-kite-agent start        # 需要提升权限
-kite-agent restart      # 需要提升权限
-kite-agent uninstall    # 需要提升权限；配置文件会留下来
+kite-agent pair        # 服务在跑时，安装者不用再提权
+kite-agent stop        # 需要提升权限
+kite-agent start       # 需要提升权限
+kite-agent restart     # 需要提升权限
+kite-agent uninstall   # 需要提升权限；配置文件会留下来
 ```
 
-日志是 `%ProgramData%\kite\kite-agent.log`。`uninstall` 不删除配置文件。要去掉注册密钥，请自行删除 `%ProgramData%\kite\config.yaml`。
+日志是 `%ProgramData%\kite\kite-agent.log`。`uninstall` 不删除配置文件。
 
-如果以前注册过名为 `kite-agent` 的登录计划任务，只有安装默认服务时才会删掉它，并删除安装目录里的 `start-kite-agent.cmd`，这样登录时不会再弹出控制台窗口。其它 `--service-name` 不会动这个任务，也不会动默认服务。
-
-可以在稳定服务旁边再装一个实例。给它单独的服务名，以及单独的 `AGENT_NAME`（避免中继踢掉你正在用的那条隧道）。不要随便传 `--install-dir`，除非你想指定目录：
+可以在稳定服务旁边再装一个实例，并使用不同的 `AGENT_NAME`：
 
 ```powershell
-$env:RELAY_ADDR = "wss://tunnel.example.com/agent"
-$env:REGISTRATION_KEY = "CHANGE_ME"
-$env:AGENT_NAME = "my-pc-test"
 .\kite-agent.exe install --service-name kite-agent-test
-.\kite-agent.exe status --service-name kite-agent-test
 ```
 
-这个实例的服务名是 `kite-agent-test`。程序在 `%ProgramFiles%\kite\kite-agent-test\kite-agent.exe`，配置在 `%ProgramData%\kite\kite-agent-test\config.yaml`，日志在 `%ProgramData%\kite\kite-agent-test\kite-agent.log`。`start`、`stop`、`restart`、`uninstall` 使用同一个 `--service-name`，不会停掉 `kite-agent`。
-
-`kite-agent list` 列出本机所有名为 `kite-agent` 或 `kite-agent-*` 的服务，不需要提升权限。每行用制表符分开：服务名、该实例配置里的 agent 名、状态（`running` 或 `stopped`）、启动类型。配置文件读不到时，agent 名是 `-`。不会打印注册密钥。如果旧的登录计划任务 `kite-agent` 还在，list 会多打一行只读说明 `legacy logon task kite-agent: <状态>`。在 Linux 和 macOS 上，这条命令会说明列出 Windows 服务不受支持。非默认实例的 `status` 提示会带上 `--service-name`。
-
-如果要在这条隧道上换掉正在提供隧道的那个程序，而 SSH 会话可能在服务重启时断开：
+它的文件在 `%ProgramFiles%\kite\kite-agent-test\` 和 `%ProgramData%\kite\kite-agent-test\`。只有默认名称会删除旧的登录计划任务。
 
 ```powershell
 .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
-.\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe --service-name kite-agent-test
 ```
 
-`upgrade` 注册一个以 SYSTEM 运行的一次性任务后就返回。任务会停掉指定的服务、用新程序覆盖已安装的 exe，再把服务拉起来。SSH 会话可以在隧道重启时断开；任务不在那个会话里，仍会做完。默认服务的结果写在 `%ProgramData%\kite\upgrade.log`，其它实例写在 `%ProgramData%\kite\<service-name>\upgrade.log`。文件里只有路径和错误，没有注册密钥。
+`upgrade` 注册一个以 SYSTEM 运行的一次性任务，即使这条 SSH 会话断开也会换掉 exe。结果写在 `%ProgramData%\kite\upgrade.log`。
 
-`deploy/install-kite-agent.ps1` 是可选的。它要求提升后的会话，然后调用 `kite-agent install`。它不会注册计划任务，也不会写包装脚本。
+`deploy/install-kite-agent.ps1` 调用同一条 `install`。前台调试仍会打开控制台，先停掉服务。
 
-前台调试仍然会打开控制台。先停掉服务，否则中继只保留后连上的那一条：
+### 手动配置 SSH 客户端
 
-```powershell
-kite-agent stop
-kite-agent
-```
-
-如果要把配置放到 `%ProgramData%\kite\config.yaml` 以外的地方，传一个不在用户配置目录里的绝对 `--config` 路径。服务账户必须能读到它。`install` 还可以用 `--install-dir`（默认 `%ProgramFiles%\kite`）。
-
-### SSH 客户端
-
-OpenSSH 不会展开 `ProxyCommand` 里的 `$变量`。`%n` 是 `Host` 别名，必须等于 `AGENT_NAME`。`RELAY_ADDR` 和 `REGISTRATION_KEY` 来自 `ssh` 进程的环境（例如在 shell 配置里 source 一份不进 git 的 `client.env`），或者来自 `~/.config/kite/config.yaml`。
+OpenSSH 不会展开 `ProxyCommand` 里的 `$变量`。`%n` 是 `Host` 别名，必须等于 `AGENT_NAME`。配对过的笔记本不用手写这块；`kite connect` 会写。仍使用 `REGISTRATION_KEY` 的旧客户端：
 
 ```
 Host my-pc
@@ -431,8 +556,6 @@ set -a
 set +a
 ssh my-pc
 ```
-
-`my-pc` 既是 SSH 主机别名，也是这台电脑的 `AGENT_NAME`。`scp`、`sftp` 和走 SSH 的 `git` 同样适用。
 
 ## 下载
 
@@ -473,13 +596,16 @@ git push origin v0.1.0-rc.2
 | 变量 | 程序 | 默认 |
 | --- | --- | --- |
 | `LISTEN_ADDR` | 中继 | `127.0.0.1:8080` |
-| `REGISTRATION_KEY` | 全部 | 必填 |
+| `REGISTRATION_KEY` | 中继、agent、旧客户端 | 中继和 agent 必填 |
+| `REGISTRATION_KEY_PREVIOUS` | 中继 | 不设置；轮换期间仍接受 |
+| `STATE_DIR` | 中继 | `/var/lib/kite` |
 | `TLS_CERT_FILE`、`TLS_KEY_FILE` | 中继 | 不设置（明文 WS） |
 | `IDLE_TIMEOUT` | 全部 | `90s` |
 | `RELAY_ADDR` | agent、客户端 | 必填，`ws://` 或 `wss://` |
 | `AGENT_NAME` | agent | 必填 |
 | `LOCAL_SSH_ADDR` | agent | `127.0.0.1:22` |
+| `SSH_USER` | agent | 接受配对公钥的账户 |
 
-对应参数：`--listen`、`--registration-key`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。`kite-agent install` 还可以用 `--install-dir`。
+对应参数：`--listen`、`--registration-key`、`--registration-key-previous`、`--state-dir`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--ssh-user`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。`kite-agent install` 还可以用 `--install-dir` 和 `--skip-ssh-setup`。`kite connect` 可以用 `--relay` 和 `--label`。`kite-agent pair` 可以用 `--ttl`（默认 10 分钟，最长 30 分钟）。
 
 在 Windows 上，如果没有 `--config` / `KITE_CONFIG`，也没有用户配置文件，kite-agent 还会读取 `%ProgramData%\kite\config.yaml`。装好的服务总会带上 `--config`，不依赖这个搜索顺序。

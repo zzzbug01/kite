@@ -271,8 +271,10 @@ func TestControlPlaneOffWindows(t *testing.T) {
 	if err != nil || in {
 		t.Fatalf("in=%v err=%v", in, err)
 	}
+	if err := Install(Options{}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "root") {
+		t.Fatalf("install: %v", err)
+	}
 	for name, err := range map[string]error{
-		"install":   Install(Options{}),
 		"uninstall": Uninstall(""),
 		"start":     Start(""),
 		"stop":      Stop(""),

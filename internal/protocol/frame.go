@@ -20,8 +20,13 @@
 //	7  data        stream bytes.
 //	8  close      stream or session failed; drop it.
 //	9  end        write half of the stream is closed (TCP FIN). Keep reading.
-//	10 ping        application heartbeat. Payload empty, stream id 0.
-//	11 pong        heartbeat reply. Payload empty, stream id 0.
+//	10 ping         application heartbeat. Payload empty, stream id 0.
+//	11 pong         heartbeat reply. Payload empty, stream id 0.
+//	12 pair_install relay -> agent, stream 0. JSON, see PairInstall.
+//	    Older agents ignore this frame. The relay then reports that the agent
+//	    does not support pairing.
+//	13 pair_result  agent -> relay, stream 0. JSON, see PairResult.
+//	    Older relays never send pair_install, so they never receive this.
 //
 // The relay never tells the agent where to dial. An open frame's payload is
 // ignored by the agent; the only address it connects to is its own
@@ -67,7 +72,16 @@ const (
 	TypeEnd      byte = 9
 	TypePing     byte = 10
 	TypePong     byte = 11
+	// TypePairInstall asks a connected agent to append one SSH public key.
+	// Stream id is 0. Peers that do not know this type ignore the frame.
+	TypePairInstall byte = 12
+	// TypePairResult is the agent's reply to TypePairInstall.
+	TypePairResult byte = 13
 )
+
+// FeaturePair is advertised in Hello.Features by agents that accept
+// TypePairInstall. Old agents omit it; old relays ignore the field.
+const FeaturePair = "pair"
 
 // Short reasons written into error frames. They are safe to show a client.
 const (
@@ -126,12 +140,45 @@ func Decode(b []byte) (Frame, error) {
 // Hello is the JSON payload of a TypeHello frame.
 //
 // Agents send Role "agent" and Name. Clients send Role "client" and Agent
-// (the agent they want). Key is the shared registration secret.
+// (the agent they want). Key is the shared registration secret, unless Auth
+// is "client", in which case Key is a per-client token from pairing.
+//
+// Auth and Features are optional. Peers from v0.1.0-rc.2 ignore unknown
+// JSON fields, so a new client still completes a legacy handshake when it
+// sends the shared registration key and leaves Auth empty.
 type Hello struct {
-	Role  string `json:"role"`
-	Key   string `json:"key"`
-	Name  string `json:"name,omitempty"`
-	Agent string `json:"agent,omitempty"`
+	Role     string   `json:"role"`
+	Key      string   `json:"key"`
+	Name     string   `json:"name,omitempty"`
+	Agent    string   `json:"agent,omitempty"`
+	Auth     string   `json:"auth,omitempty"`
+	Features []string `json:"features,omitempty"`
+}
+
+// PairInstall is the JSON payload of TypePairInstall.
+// The pairing code itself is not included; it never leaves the relay.
+type PairInstall struct {
+	RequestID string `json:"request_id"`
+	PublicKey string `json:"public_key"`
+	Label     string `json:"label"`
+}
+
+// PairResult is the JSON payload of TypePairResult.
+type PairResult struct {
+	RequestID string `json:"request_id"`
+	OK        bool   `json:"ok"`
+	SSHUser   string `json:"ssh_user,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// HasFeature reports whether name was advertised on a hello.
+func HasFeature(features []string, name string) bool {
+	for _, f := range features {
+		if f == name {
+			return true
+		}
+	}
+	return false
 }
 
 // MarshalHello encodes a hello payload.

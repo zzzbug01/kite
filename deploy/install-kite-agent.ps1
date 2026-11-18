@@ -5,8 +5,9 @@
     Install kite-agent as a Windows service.
 
 .DESCRIPTION
-    Calls `kite-agent install`. The service starts at boot, including when
-    nobody is logged on, and it does not open a console window.
+    Calls `kite-agent install`. install also sets up the OpenSSH Server
+    service (Automatic, no new firewall rule). The service starts at boot,
+    including when nobody is logged on, and it does not open a console window.
 
     Settings are passed to the installer through environment variables. The
     installer writes them to %ProgramData%\kite\config.yaml (or -ConfigPath)
@@ -29,6 +30,7 @@ param(
     [string]$RegistrationKey = "CHANGE_ME",
     [string]$AgentName = "my-pc",
     [string]$LocalSSHAddr = "127.0.0.1:22",
+    [string]$SSHUser = "",
     [string]$ConfigPath = "",
     [string]$ServiceName = "kite-agent"
 )
@@ -72,12 +74,16 @@ $previous = @{
     REGISTRATION_KEY = [Environment]::GetEnvironmentVariable("REGISTRATION_KEY", "Process")
     AGENT_NAME       = [Environment]::GetEnvironmentVariable("AGENT_NAME", "Process")
     LOCAL_SSH_ADDR   = [Environment]::GetEnvironmentVariable("LOCAL_SSH_ADDR", "Process")
+    SSH_USER         = [Environment]::GetEnvironmentVariable("SSH_USER", "Process")
 }
 
 $env:RELAY_ADDR = $RelayAddr
 $env:REGISTRATION_KEY = $RegistrationKey
 $env:AGENT_NAME = $AgentName
 $env:LOCAL_SSH_ADDR = $LocalSSHAddr
+if (-not [string]::IsNullOrWhiteSpace($SSHUser)) {
+    $env:SSH_USER = $SSHUser
+}
 
 if ([string]::IsNullOrWhiteSpace($ServiceName)) {
     Write-Error "Pass -ServiceName. The default is kite-agent. Another name installs a separate service."
@@ -101,7 +107,7 @@ try {
         $code = 0
     }
 } finally {
-    foreach ($name in @("RELAY_ADDR", "REGISTRATION_KEY", "AGENT_NAME", "LOCAL_SSH_ADDR")) {
+    foreach ($name in @("RELAY_ADDR", "REGISTRATION_KEY", "AGENT_NAME", "LOCAL_SSH_ADDR", "SSH_USER")) {
         $prior = $previous[$name]
         if ($null -eq $prior) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue

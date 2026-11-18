@@ -8,6 +8,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/url"
@@ -36,11 +37,13 @@ type File struct {
 
 // RelaySection is the kite-relay portion of a config file.
 type RelaySection struct {
-	ListenAddr      string `yaml:"listen_addr"`
-	RegistrationKey string `yaml:"registration_key"`
-	TLSCertFile     string `yaml:"tls_cert_file"`
-	TLSKeyFile      string `yaml:"tls_key_file"`
-	IdleTimeout     string `yaml:"idle_timeout"`
+	ListenAddr              string `yaml:"listen_addr"`
+	RegistrationKey         string `yaml:"registration_key"`
+	RegistrationKeyPrevious string `yaml:"registration_key_previous"`
+	StateDir                string `yaml:"state_dir"`
+	TLSCertFile             string `yaml:"tls_cert_file"`
+	TLSKeyFile              string `yaml:"tls_key_file"`
+	IdleTimeout             string `yaml:"idle_timeout"`
 }
 
 // AgentSection is the kite-agent portion of a config file.
@@ -50,22 +53,34 @@ type AgentSection struct {
 	Name            string `yaml:"name"`
 	LocalSSHAddr    string `yaml:"local_ssh_addr"`
 	IdleTimeout     string `yaml:"idle_timeout"`
+	SSHUser         string `yaml:"ssh_user"`
 }
 
 // ClientSection is the kite client portion of a config file.
+// ClientAgent is one paired laptop. Token is a per-client secret, not the
+// registration key.
+type ClientAgent struct {
+	Token        string `yaml:"token"`
+	User         string `yaml:"user,omitempty"`
+	IdentityFile string `yaml:"identity_file,omitempty"`
+}
+
 type ClientSection struct {
-	RelayAddr       string `yaml:"relay_addr"`
-	RegistrationKey string `yaml:"registration_key"`
-	IdleTimeout     string `yaml:"idle_timeout"`
+	RelayAddr       string                 `yaml:"relay_addr"`
+	RegistrationKey string                 `yaml:"registration_key"`
+	IdleTimeout     string                 `yaml:"idle_timeout"`
+	Agents          map[string]ClientAgent `yaml:"agents,omitempty"`
 }
 
 // Relay is the resolved kite-relay configuration.
 type Relay struct {
-	ListenAddr      string
-	RegistrationKey string
-	TLSCertFile     string
-	TLSKeyFile      string
-	IdleTimeout     time.Duration
+	ListenAddr              string
+	RegistrationKey         string
+	RegistrationKeyPrevious string
+	StateDir                string
+	TLSCertFile             string
+	TLSKeyFile              string
+	IdleTimeout             time.Duration
 }
 
 // Agent is the resolved kite-agent configuration.
@@ -75,6 +90,7 @@ type Agent struct {
 	Name            string
 	LocalSSHAddr    string
 	IdleTimeout     time.Duration
+	SSHUser         string
 }
 
 // Client is the resolved kite client configuration.
@@ -82,6 +98,7 @@ type Client struct {
 	RelayAddr       string
 	RegistrationKey string
 	IdleTimeout     time.Duration
+	Agents          map[string]ClientAgent
 }
 
 // LoadRelay resolves relay settings. explicitPath, when non-empty, must exist.
@@ -91,11 +108,16 @@ func LoadRelay(explicitPath string) (Relay, error) {
 		return Relay{}, err
 	}
 	cfg := Relay{
-		ListenAddr:      "127.0.0.1:8080",
-		IdleTimeout:     protocol.DefaultIdleTimeout,
-		RegistrationKey: file.Relay.RegistrationKey,
-		TLSCertFile:     file.Relay.TLSCertFile,
-		TLSKeyFile:      file.Relay.TLSKeyFile,
+		ListenAddr:              "127.0.0.1:8080",
+		IdleTimeout:             protocol.DefaultIdleTimeout,
+		RegistrationKey:         file.Relay.RegistrationKey,
+		RegistrationKeyPrevious: file.Relay.RegistrationKeyPrevious,
+		StateDir:                file.Relay.StateDir,
+		TLSCertFile:             file.Relay.TLSCertFile,
+		TLSKeyFile:              file.Relay.TLSKeyFile,
+	}
+	if cfg.StateDir == "" {
+		cfg.StateDir = defaultStateDir()
 	}
 	if file.Relay.ListenAddr != "" {
 		cfg.ListenAddr = file.Relay.ListenAddr
@@ -110,6 +132,12 @@ func LoadRelay(explicitPath string) (Relay, error) {
 	}
 	if v := os.Getenv("REGISTRATION_KEY"); v != "" {
 		cfg.RegistrationKey = v
+	}
+	if v := os.Getenv("REGISTRATION_KEY_PREVIOUS"); v != "" {
+		cfg.RegistrationKeyPrevious = v
+	}
+	if v := os.Getenv("STATE_DIR"); v != "" {
+		cfg.StateDir = v
 	}
 	if v := os.Getenv("TLS_CERT_FILE"); v != "" {
 		cfg.TLSCertFile = v
@@ -141,6 +169,7 @@ func LoadAgent(explicitPath string) (Agent, error) {
 		RelayAddr:       file.Agent.RelayAddr,
 		RegistrationKey: file.Agent.RegistrationKey,
 		Name:            file.Agent.Name,
+		SSHUser:         file.Agent.SSHUser,
 	}
 	if file.Agent.LocalSSHAddr != "" {
 		cfg.LocalSSHAddr = file.Agent.LocalSSHAddr
@@ -161,6 +190,9 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	}
 	if v := os.Getenv("LOCAL_SSH_ADDR"); v != "" {
 		cfg.LocalSSHAddr = v
+	}
+	if v := os.Getenv("SSH_USER"); v != "" {
+		cfg.SSHUser = v
 	}
 	if v := os.Getenv("IDLE_TIMEOUT"); v != "" {
 		d, err := parseDuration(v)
@@ -184,6 +216,7 @@ func LoadClient(explicitPath string) (Client, error) {
 		IdleTimeout:     protocol.DefaultIdleTimeout,
 		RelayAddr:       file.Client.RelayAddr,
 		RegistrationKey: file.Client.RegistrationKey,
+		Agents:          file.Client.Agents,
 	}
 	if d, err := parseDuration(file.Client.IdleTimeout); err != nil {
 		return Client{}, fmt.Errorf("client.idle_timeout: %w", err)
@@ -206,6 +239,125 @@ func LoadClient(explicitPath string) (Client, error) {
 		}
 	}
 	return cfg, nil
+}
+
+// CredentialFor returns the secret used to dial agent. A paired client token
+// wins over the shared registration key so a laptop can keep working after
+// the shared key is rotated.
+func (c Client) CredentialFor(agent string) (secret, kind string, err error) {
+	if c.Agents != nil {
+		if a, ok := c.Agents[agent]; ok && strings.TrimSpace(a.Token) != "" {
+			return a.Token, "client", nil
+		}
+	}
+	if strings.TrimSpace(c.RegistrationKey) != "" {
+		return c.RegistrationKey, "registration", nil
+	}
+	return "", "", fmt.Errorf("no credential for %s; run kite connect or set REGISTRATION_KEY", agent)
+}
+
+// ClientUpdate is one paired agent written into the client config section.
+type ClientUpdate struct {
+	RelayAddr    string
+	Agent        string
+	Token        string
+	User         string
+	IdentityFile string
+}
+
+// MergeClient writes or updates the client section of path. Other sections
+// are preserved. The file mode is 0600. The token is a per-client secret.
+func MergeClient(path string, upd ClientUpdate) error {
+	if strings.TrimSpace(upd.Agent) == "" || strings.TrimSpace(upd.Token) == "" {
+		return errors.New("client update requires an agent name and token")
+	}
+	root := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(b, &root); err != nil {
+			return fmt.Errorf("parse existing config %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	client, _ := root["client"].(map[string]any)
+	if client == nil {
+		client = map[string]any{}
+	}
+	if strings.TrimSpace(upd.RelayAddr) != "" {
+		client["relay_addr"] = upd.RelayAddr
+	}
+	agents, _ := client["agents"].(map[string]any)
+	if agents == nil {
+		agents = map[string]any{}
+	}
+	entry := map[string]any{"token": upd.Token}
+	if upd.User != "" {
+		entry["user"] = upd.User
+	}
+	if upd.IdentityFile != "" {
+		entry["identity_file"] = upd.IdentityFile
+	}
+	agents[upd.Agent] = entry
+	client["agents"] = agents
+	root["client"] = client
+	var buf bytes.Buffer
+	buf.WriteString("# kite client configuration. Contains a per-client token. Do not commit.\n")
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	return writePrivate(path, buf.Bytes())
+}
+
+func writePrivate(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	_ = os.Chmod(filepath.Dir(path), 0o700)
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(tmp)
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(path)
+		if err2 := os.Rename(tmp, path); err2 != nil {
+			os.Remove(tmp)
+			return err2
+		}
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func defaultStateDir() string {
+	if runtime.GOOS == "windows" {
+		root := strings.TrimSpace(os.Getenv("ProgramData"))
+		if root == "" {
+			root = `C:\ProgramData`
+		}
+		return filepath.Join(root, "kite", "state")
+	}
+	return "/var/lib/kite"
 }
 
 // ValidateKey rejects an empty key and the published example placeholder.

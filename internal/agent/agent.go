@@ -31,11 +31,34 @@ type Config struct {
 	Logger          *slog.Logger
 	// HTTPClient overrides the handshake client. Production leaves it nil.
 	HTTPClient *http.Client
+	// SSHUser is the account whose authorized_keys receives paired keys.
+	SSHUser string
+	// SSHAdmin forces the Windows administrators_authorized_keys path when
+	// non-nil. Nil detects membership of the Administrators group.
+	SSHAdmin *bool
+	// HomeDir overrides the home directory used for authorized_keys. Tests set it.
+	HomeDir string
+	// ProgramData overrides the Windows program data root. Empty uses the default.
+	ProgramData string
+	// EnableControl serves the loopback pair/unpair socket.
+	EnableControl bool
+	// ControlPath is the endpoint file. Empty uses the default next to the config.
+	ControlPath string
+	// ConfigPath is the agent config file, used to place the control file.
+	ConfigPath string
 }
 
 // Run dials the relay and reconnects with exponential backoff until ctx ends.
 func Run(ctx context.Context, cfg Config) error {
 	cfg = cfg.normalized()
+	if cfg.EnableControl {
+		stop, err := startControl(ctx, cfg)
+		if err != nil {
+			cfg.logger().Info("local pairing control disabled", "err", err)
+		} else {
+			defer stop()
+		}
+	}
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	log := cfg.logger()
@@ -104,9 +127,10 @@ func serve(ctx context.Context, ws *websocket.Conn, cfg Config) error {
 	cfg = cfg.normalized()
 	log := cfg.logger()
 	hello, err := protocol.MarshalHello(protocol.Hello{
-		Role: "agent",
-		Key:  cfg.RegistrationKey,
-		Name: cfg.Name,
+		Role:     "agent",
+		Key:      cfg.RegistrationKey,
+		Name:     cfg.Name,
+		Features: []string{protocol.FeaturePair},
 	})
 	if err != nil {
 		return err
@@ -168,6 +192,10 @@ func serve(ctx context.Context, ws *websocket.Conn, cfg Config) error {
 			sess.onEnd(f.StreamID)
 		case protocol.TypeClose:
 			sess.onClose(f.StreamID)
+		case protocol.TypePairInstall:
+			if f.StreamID == 0 {
+				sess.handlePair(f.Payload)
+			}
 		default:
 		}
 	}

@@ -25,6 +25,8 @@ import (
 
 	"github.com/zzzbug01/kite/internal/agent"
 	"github.com/zzzbug01/kite/internal/client"
+	"github.com/zzzbug01/kite/internal/clientkey"
+	"github.com/zzzbug01/kite/internal/pairing"
 	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/relay"
 	"github.com/zzzbug01/kite/internal/wsutil"
@@ -47,6 +49,7 @@ func startRelayTLS(t *testing.T, idle, ping time.Duration, certFile, keyFile str
 	}
 	srv := relay.New(relay.Config{
 		RegistrationKey: "test-key",
+		StateDir:        t.TempDir(),
 		IdleTimeout:     idle,
 		PingInterval:    ping,
 		Logger:          discard(),
@@ -590,6 +593,172 @@ func TestTLSRelay(t *testing.T) {
 		t.Fatal("agent missing")
 	}
 	roundTrip(t, st, []byte("tls-ok"))
+}
+
+func TestPairingAndClientToken(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := t.TempDir()
+	srv := relay.New(relay.Config{
+		RegistrationKey: "test-key",
+		PreviousKey:     "old-key",
+		StateDir:        state,
+		IdleTimeout:     time.Hour,
+		PingInterval:    time.Hour,
+		Logger:          logger,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(ctx, ln, "", "") }()
+	t.Cleanup(func() {
+		cancel()
+		ln.Close()
+		select {
+		case <-errc:
+		case <-time.After(5 * time.Second):
+			t.Errorf("relay did not stop")
+		}
+	})
+	base := "ws://" + ln.Addr().String()
+	home := t.TempDir()
+	local := startEcho(t)
+	admin := false
+	go func() {
+		_ = agent.Run(ctx, agent.Config{
+			RelayURL:        base + "/agent",
+			RegistrationKey: "test-key",
+			Name:            "pc",
+			LocalSSHAddr:    local,
+			IdleTimeout:     time.Hour,
+			PingInterval:    time.Hour,
+			Logger:          discard(),
+			SSHUser:         "tester",
+			HomeDir:         home,
+			SSHAdmin:        &admin,
+		})
+	}()
+	waitAgent(t, srv, "pc")
+
+	httpBase := "http://" + ln.Addr().String()
+	created, err := pairing.PostCreate(ctx, httpBase, pairing.CreateRequest{
+		Key:       "test-key",
+		Agent:     "pc",
+		SSHUser:   "tester",
+		ClientURL: base + "/client",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pairing.PostCreate(ctx, httpBase, pairing.CreateRequest{
+		Key: "not-the-key", Agent: "pc", ClientURL: base + "/client",
+	}); err == nil {
+		t.Fatal("bad registration key was accepted")
+	}
+
+	ws, err := wsutil.Dial(ctx, base+"/agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.CloseNow()
+	oldHello, err := protocol.MarshalHello(protocol.Hello{Role: "agent", Key: "test-key", Name: "old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wsutil.WriteFrame(ctx, ws, protocol.Frame{Type: protocol.TypeHello, Payload: oldHello}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wsutil.ReadFrame(ctx, ws); err != nil {
+		t.Fatal(err)
+	}
+	waitAgent(t, srv, "old")
+	if _, err := pairing.PostCreate(ctx, httpBase, pairing.CreateRequest{
+		Key: "test-key", Agent: "old", ClientURL: base + "/client",
+	}); err == nil || !strings.Contains(err.Error(), "does not support pairing") {
+		t.Fatalf("old agent: %v", err)
+	}
+
+	_, pub, err := clientkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeemed, err := pairing.PostRedeem(ctx, httpBase, pairing.RedeemRequest{
+		Code: created.Code, PublicKey: pub, Label: "laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redeemed.Agent != "pc" || redeemed.SSHUser != "tester" || !strings.HasPrefix(redeemed.ClientToken, "kite_") {
+		t.Fatalf("%+v", redeemed)
+	}
+	if _, err := pairing.PostRedeem(ctx, httpBase, pairing.RedeemRequest{
+		Code: created.Code, PublicKey: pub, Label: "laptop",
+	}); err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("reuse: %v", err)
+	}
+	keys, err := os.ReadFile(filepath.Join(home, ".ssh", "authorized_keys"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(keys), pub) || !strings.Contains(string(keys), "kite-pair laptop") {
+		t.Fatalf("authorized_keys:\n%s", keys)
+	}
+	logText := logs.String()
+	for _, secret := range []string{"test-key", "old-key", created.Code, strings.ReplaceAll(created.Code, "-", ""), redeemed.ClientToken} {
+		if strings.Contains(logText, secret) {
+			t.Fatalf("log contains secret %q\n%s", secret, logText)
+		}
+	}
+
+	st, err := client.Dial(ctx, client.Config{
+		RelayURL:        base + "/client",
+		RegistrationKey: redeemed.ClientToken,
+		Auth:            "client",
+		Agent:           "pc",
+		IdleTimeout:     time.Hour,
+		PingInterval:    time.Hour,
+		Logger:          discard(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, st, []byte("paired"))
+	st.Close()
+
+	for _, key := range []string{"test-key", "old-key"} {
+		legacy, err := client.Dial(ctx, client.Config{
+			RelayURL:        base + "/client",
+			RegistrationKey: key,
+			Agent:           "pc",
+			IdleTimeout:     time.Hour,
+			PingInterval:    time.Hour,
+			Logger:          discard(),
+		})
+		if err != nil {
+			t.Fatalf("legacy %s: %v", key, err)
+		}
+		roundTrip(t, legacy, []byte("legacy"))
+		legacy.Close()
+	}
+
+	if _, err := pairing.Open(state).Revoke("laptop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Dial(ctx, client.Config{
+		RelayURL:        base + "/client",
+		RegistrationKey: redeemed.ClientToken,
+		Auth:            "client",
+		Agent:           "pc",
+		IdleTimeout:     time.Hour,
+		PingInterval:    time.Hour,
+		Logger:          discard(),
+	}); !errors.Is(err, client.ErrUnauthorized) && (err == nil || !strings.Contains(err.Error(), "unauthorized")) {
+		t.Fatalf("revoked token: %v", err)
+	}
 }
 
 func writeCert(t *testing.T) (string, string) {

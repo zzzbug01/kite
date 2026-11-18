@@ -26,6 +26,9 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "tokens" {
+		return runTokens(args[1:])
+	}
 	cfg, err := config.LoadRelay(config.PeekConfigFlag(args))
 	if err != nil {
 		return err
@@ -36,6 +39,8 @@ func run(args []string) error {
 	fs.String("config", "", "YAML config file (or KITE_CONFIG). Keep it gitignored; do not commit secrets")
 	fs.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "listen address (env LISTEN_ADDR)")
 	fs.StringVar(&cfg.RegistrationKey, "registration-key", cfg.RegistrationKey, "shared registration key (env REGISTRATION_KEY)")
+	fs.StringVar(&cfg.RegistrationKeyPrevious, "registration-key-previous", cfg.RegistrationKeyPrevious, "previous registration key still accepted during rotation (env REGISTRATION_KEY_PREVIOUS)")
+	fs.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "directory for hashed client tokens (env STATE_DIR)")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate (env TLS_CERT_FILE); plain WS if unset")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key (env TLS_KEY_FILE)")
 	idle := fs.Duration("idle-timeout", cfg.IdleTimeout, "close a connection after this long with no received frames (env IDLE_TIMEOUT)")
@@ -44,6 +49,11 @@ func run(args []string) error {
 		fmt.Fprintf(fs.Output(), "Listens for kite agents and clients. Default is plain WebSocket on 127.0.0.1:8080\n")
 		fmt.Fprintf(fs.Output(), "for nginx or Caddy to terminate TLS. Set REGISTRATION_KEY in the environment\n")
 		fmt.Fprintf(fs.Output(), "or a gitignored config file. Never commit it.\n\n")
+		fmt.Fprintf(fs.Output(), "  kite-relay tokens list\n")
+		fmt.Fprintf(fs.Output(), "  kite-relay tokens revoke <id-or-label>\n\n")
+		fmt.Fprintf(fs.Output(), "Client tokens issued by kite connect are stored as hashes in STATE_DIR\n")
+		fmt.Fprintf(fs.Output(), "(default /var/lib/kite). REGISTRATION_KEY_PREVIOUS is accepted during\n")
+		fmt.Fprintf(fs.Output(), "a key rotation so agents can move one at a time.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -79,6 +89,8 @@ func run(args []string) error {
 	slog.Info("kite-relay listening", "version", version.Version, "addr", ln.Addr().String(), "tls", cfg.TLSCertFile != "")
 	srv := relay.New(relay.Config{
 		RegistrationKey: cfg.RegistrationKey,
+		PreviousKey:     cfg.RegistrationKeyPrevious,
+		StateDir:        cfg.StateDir,
 		IdleTimeout:     cfg.IdleTimeout,
 	})
 	return srv.Serve(ctx, ln, cfg.TLSCertFile, cfg.TLSKeyFile)

@@ -16,6 +16,7 @@ import (
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/process"
+	"github.com/zzzbug01/kite/internal/sshsetup"
 	"github.com/zzzbug01/kite/internal/version"
 )
 
@@ -44,12 +45,33 @@ func run(args []string) error {
 			return runService(rest)
 		}
 		return runForeground(rest)
+	case agentsvc.CmdSetup:
+		return runSetup(rest)
 	case agentsvc.CmdInstall:
 		opt, done, err := ready(rest, true)
 		if done || err != nil {
 			return err
 		}
+		if !opt.SkipSSHSetup {
+			rep, setupErr := sshsetup.Ensure(context.Background(), opt.Config.LocalSSHAddr)
+			fmt.Fprint(os.Stdout, rep.Text())
+			if setupErr != nil {
+				return setupErr
+			}
+		}
+		if opt.Config.SSHUser == "" {
+			opt.Config.SSHUser = defaultSSHUser()
+		}
+		if opt.Config.SSHUser == "" {
+			fmt.Fprintln(os.Stdout, "ssh user: not set; set SSH_USER before pairing if this process runs as root or LocalSystem")
+		} else {
+			fmt.Fprintf(os.Stdout, "ssh user: %s\n", opt.Config.SSHUser)
+		}
 		return agentsvc.Install(opt)
+	case agentsvc.CmdPair:
+		return runPair(rest)
+	case agentsvc.CmdUnpair:
+		return runUnpair(rest)
 	case agentsvc.CmdUninstall:
 		name, done, err := controlName("uninstall", rest)
 		if done || err != nil {
@@ -138,6 +160,12 @@ func help(args []string) error {
 				return err
 			}
 			return nil
+		case "setup":
+			return runSetup([]string{"-h"})
+		case "pair":
+			return runPair([]string{"-h"})
+		case "unpair":
+			return runUnpair([]string{"-h"})
 		case "status", "start", "stop", "restart", "uninstall":
 			_, err := agentsvc.ParseControl(strings.ToLower(args[0]), []string{"-h"})
 			if errors.Is(err, flag.ErrHelp) {
@@ -219,5 +247,8 @@ func runAgent(ctx context.Context, opt agentsvc.Options) error {
 		Name:            opt.Config.Name,
 		LocalSSHAddr:    opt.Config.LocalSSHAddr,
 		IdleTimeout:     opt.Config.IdleTimeout,
+		SSHUser:         opt.Config.SSHUser,
+		EnableControl:   true,
+		ConfigPath:      opt.ConfigPath,
 	})
 }

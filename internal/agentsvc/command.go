@@ -39,16 +39,20 @@ const (
 	CmdStatus    Command = "status"
 	CmdList      Command = "list"
 	CmdUpgrade   Command = "upgrade"
+	CmdSetup     Command = "setup"
+	CmdPair      Command = "pair"
+	CmdUnpair    Command = "unpair"
 	CmdHelp      Command = "help"
 )
 
 // Options is the parsed agent configuration for run and install.
 type Options struct {
-	Config      config.Agent
-	ConfigPath  string // explicit --config, or empty when discovery/env was used
-	InstallDir  string
-	ServiceName string
-	ShowVersion bool
+	Config       config.Agent
+	ConfigPath   string // explicit --config, or empty when discovery/env was used
+	InstallDir   string
+	ServiceName  string
+	ShowVersion  bool
+	SkipSSHSetup bool
 }
 
 // UpgradeOptions selects the binary swap for one Windows service instance.
@@ -80,7 +84,7 @@ func Split(args []string) (Command, []string, error) {
 		return CmdRun, nil, nil
 	}
 	switch strings.ToLower(args[0]) {
-	case "run", "install", "uninstall", "start", "stop", "restart", "status", "list", "upgrade":
+	case "run", "install", "uninstall", "start", "stop", "restart", "status", "list", "upgrade", "setup", "pair", "unpair":
 		return Command(strings.ToLower(args[0])), args[1:], nil
 	case "help", "-h", "--help":
 		return CmdHelp, args[1:], nil
@@ -97,7 +101,11 @@ func Usage() string {
 	return `Usage:
   kite-agent [flags]
   kite-agent run [flags]
+  kite-agent setup
   kite-agent install [flags]
+  kite-agent pair
+  kite-agent unpair --list
+  kite-agent unpair --revoke <label>
   kite-agent uninstall
   kite-agent start
   kite-agent stop
@@ -108,6 +116,16 @@ func Usage() string {
 
 kite-agent dials a kite relay and forwards streams only to the local SSH
 server. With no command it runs in the foreground.
+
+setup checks the local SSH server. install runs setup, then registers the
+service. On Windows that is the Service Control Manager. On Linux and macOS,
+install as root writes the systemd unit or launchd daemon. pair prints a
+one-time code; on the other computer run "kite connect CODE".
+
+pair talks to the running agent on 127.0.0.1 when that control file is
+readable, so the installing user does not need a further elevation prompt.
+Otherwise it uses the registration key from the environment or config, which
+means the agent must already be connected. The code is not the registration key.
 
 On Windows, install registers service "kite-agent". The service starts at
 boot (automatic, delayed) without a logged-on user and does not open a
@@ -177,9 +195,12 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	idle := fs.Duration("idle-timeout", cfg.IdleTimeout, "reconnect after this long with no received frames (env IDLE_TIMEOUT)")
 	var installDir string
 	var serviceName string
+	var skipSSH bool
 	fs.StringVar(&serviceName, "service-name", "", "Windows service name (default kite-agent). Another name gets its own exe, config, and log")
+	fs.StringVar(&cfg.SSHUser, "ssh-user", cfg.SSHUser, "local account that receives paired SSH keys (env SSH_USER)")
 	if install {
 		fs.StringVar(&installDir, "install-dir", "", `directory for kite-agent.exe (default %ProgramFiles%\kite, or %ProgramFiles%\kite\<service-name>)`)
+		fs.BoolVar(&skipSSH, "skip-ssh-setup", false, "do not install or start the local SSH server")
 	}
 	fs.Usage = func() {
 		if install {
@@ -229,7 +250,7 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	if !protocol.ValidName(cfg.Name) {
 		return Options{}, errors.New("AGENT_NAME is required and must not contain whitespace")
 	}
-	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir, ServiceName: canon}, nil
+	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir, ServiceName: canon, SkipSSHSetup: skipSSH}, nil
 }
 
 // ParseControl reads --service-name for status, start, stop, restart, and uninstall.
@@ -572,13 +593,17 @@ func WriteAgentFile(path string, agent config.Agent) error {
 	if root == nil {
 		root = map[string]any{}
 	}
-	root["agent"] = map[string]any{
+	agentDoc := map[string]any{
 		"relay_addr":       agent.RelayAddr,
 		"registration_key": agent.RegistrationKey,
 		"name":             agent.Name,
 		"local_ssh_addr":   agent.LocalSSHAddr,
 		"idle_timeout":     formatDuration(agent.IdleTimeout),
 	}
+	if strings.TrimSpace(agent.SSHUser) != "" {
+		agentDoc["ssh_user"] = agent.SSHUser
+	}
+	root["agent"] = agentDoc
 	var buf bytes.Buffer
 	buf.WriteString("# kite service configuration. This file contains the registration key.\n")
 	buf.WriteString("# Do not commit it. The Windows service reads it as LocalSystem.\n")
