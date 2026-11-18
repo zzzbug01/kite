@@ -28,8 +28,27 @@ key. Do not commit it. The service command line is only the executable and
 
 Logs: %ProgramData%\kite\kite-agent.log
 
+A second service can sit beside kite-agent. Use a different AGENT_NAME so
+the relay does not drop the tunnel you are using:
+
+    .\kite-agent.exe install --service-name kite-agent-test
+
+Its files live under %ProgramFiles%\kite\kite-agent-test\ and
+%ProgramData%\kite\kite-agent-test\. status, start, stop, restart, and
+uninstall take the same --service-name. Only the default name removes an
+old logon task.
+
+To replace a running exe even if this SSH session dies when the tunnel
+restarts:
+
+    .\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
+
+That schedules a one-shot SYSTEM task and returns. The result is
+%ProgramData%\kite\upgrade.log (or %ProgramData%\kite\<service-name>\upgrade.log).
+
 install-kite-agent.ps1 in this zip calls the same install command. It does
-not register a scheduled task.
+not register a logon scheduled task. Pass -ServiceName to install another
+instance.
 
 Linux uses the systemd unit in the source repository (deploy/kite-agent.service).
 macOS uses deploy/com.kite.agent.plist. Neither file is in this zip.

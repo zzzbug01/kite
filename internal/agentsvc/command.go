@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	// ServiceName is the Windows service name and the systemd unit base name.
+	// ServiceName is the default Windows service name. Existing installs keep
+	// this name and the original ProgramData and Program Files paths.
 	ServiceName = "kite-agent"
 	logFileName = "kite-agent.log"
 )
@@ -35,6 +36,7 @@ const (
 	CmdStop      Command = "stop"
 	CmdRestart   Command = "restart"
 	CmdStatus    Command = "status"
+	CmdUpgrade   Command = "upgrade"
 	CmdHelp      Command = "help"
 )
 
@@ -43,11 +45,20 @@ type Options struct {
 	Config      config.Agent
 	ConfigPath  string // explicit --config, or empty when discovery/env was used
 	InstallDir  string
+	ServiceName string
 	ShowVersion bool
+}
+
+// UpgradeOptions selects the binary swap for one Windows service instance.
+type UpgradeOptions struct {
+	ServiceName string
+	From        string
+	Apply       bool
 }
 
 // StatusInfo is a service query result. Zero means not installed.
 type StatusInfo struct {
+	Name      string
 	Installed bool
 	State     string
 	StartType string
@@ -67,7 +78,7 @@ func Split(args []string) (Command, []string, error) {
 		return CmdRun, nil, nil
 	}
 	switch strings.ToLower(args[0]) {
-	case "run", "install", "uninstall", "start", "stop", "restart", "status":
+	case "run", "install", "uninstall", "start", "stop", "restart", "status", "upgrade":
 		return Command(strings.ToLower(args[0])), args[1:], nil
 	case "help", "-h", "--help":
 		return CmdHelp, args[1:], nil
@@ -90,6 +101,7 @@ func Usage() string {
   kite-agent stop
   kite-agent restart
   kite-agent status
+  kite-agent upgrade --from <new-exe>
 
 kite-agent dials a kite relay and forwards streams only to the local SSH
 server. With no command it runs in the foreground.
@@ -104,16 +116,27 @@ console window:
   kite-agent start
   kite-agent restart
   kite-agent uninstall
+  kite-agent upgrade --from C:\path\to\new\kite-agent.exe
 
-install, start, stop, restart, and uninstall need an elevated Administrator
-prompt. status does not. install writes the registration key to
-%ProgramData%\kite\config.yaml (or to --config) and records only that path
-on the service command line. Environment variables and flags are saved into
-the file because the service account does not see your shell environment.
+Pass --service-name to install a second instance beside the default one.
+The default name keeps %ProgramData%\kite\config.yaml and
+%ProgramFiles%\kite\kite-agent.exe. Any other name uses
+%ProgramData%\kite\<service-name>\ and %ProgramFiles%\kite\<service-name>\.
+status, start, stop, restart, uninstall, and upgrade accept the same flag
+and touch only that instance.
+
+install, start, stop, restart, uninstall, and upgrade need an elevated
+Administrator prompt. status does not. install writes the registration key
+to the instance config file and records only that path on the service
+command line. Environment variables and flags are saved into the file
+because the service account does not see your shell environment.
 Do not commit the file.
 
-install also removes a legacy logon scheduled task named kite-agent when one
-exists, so an older setup stops opening a console window at login.
+install removes a legacy logon scheduled task named kite-agent only when
+installing the default service, so a test instance cannot remove the stable
+setup. upgrade schedules a one-shot SYSTEM task that stops the service,
+replaces the exe, and starts it again. The SSH session can drop when the
+tunnel restarts; the task still finishes.
 
 On Linux use deploy/kite-agent.service with systemctl. On macOS use
 deploy/com.kite.agent.plist with launchctl.
@@ -147,8 +170,10 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	fs.StringVar(&cfg.LocalSSHAddr, "local", cfg.LocalSSHAddr, "local SSH address to dial (env LOCAL_SSH_ADDR). The relay cannot change this")
 	idle := fs.Duration("idle-timeout", cfg.IdleTimeout, "reconnect after this long with no received frames (env IDLE_TIMEOUT)")
 	var installDir string
+	var serviceName string
+	fs.StringVar(&serviceName, "service-name", "", "Windows service name (default kite-agent). Another name gets its own exe, config, and log")
 	if install {
-		fs.StringVar(&installDir, "install-dir", "", `directory for kite-agent.exe (default %ProgramFiles%\kite)`)
+		fs.StringVar(&installDir, "install-dir", "", `directory for kite-agent.exe (default %ProgramFiles%\kite, or %ProgramFiles%\kite\<service-name>)`)
 	}
 	fs.Usage = func() {
 		if install {
@@ -156,7 +181,8 @@ func ParseOptions(args []string, install bool) (Options, error) {
 			fmt.Fprintf(fs.Output(), "Register the Windows service and start it. Requires an elevated\n")
 			fmt.Fprintf(fs.Output(), "Administrator prompt. The registration key is written to\n")
 			fmt.Fprintf(fs.Output(), "%%ProgramData%%\\kite\\config.yaml (or --config) and is not placed\n")
-			fmt.Fprintf(fs.Output(), "on the service command line. Do not commit that file.\n\n")
+			fmt.Fprintf(fs.Output(), "on the service command line. Do not commit that file.\n")
+			fmt.Fprintf(fs.Output(), "--service-name installs a second instance and does not replace kite-agent.\n\n")
 		} else {
 			fmt.Fprintf(fs.Output(), "Usage: kite-agent [flags]\n\n")
 			fmt.Fprintf(fs.Output(), "Dials the relay and forwards incoming streams only to LOCAL_SSH_ADDR\n")
@@ -182,6 +208,10 @@ func ParseOptions(args []string, install bool) (Options, error) {
 		}
 	})
 	cfg.IdleTimeout = *idle
+	canon, err := CanonicalServiceName(serviceName)
+	if err != nil {
+		return Options{}, err
+	}
 	if err := config.ValidateKey(cfg.RegistrationKey); err != nil {
 		return Options{}, err
 	}
@@ -193,16 +223,185 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	if !protocol.ValidName(cfg.Name) {
 		return Options{}, errors.New("AGENT_NAME is required and must not contain whitespace")
 	}
-	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir}, nil
+	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir, ServiceName: canon}, nil
+}
+
+// ParseControl reads --service-name for status, start, stop, restart, and uninstall.
+func ParseControl(command string, args []string) (string, error) {
+	fs := flag.NewFlagSet("kite-agent "+command, flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var serviceName string
+	fs.StringVar(&serviceName, "service-name", "", "Windows service to act on (default kite-agent)")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: kite-agent %s [--service-name name]\n\n", command)
+		fmt.Fprintf(fs.Output(), "Acts only on that Windows service. The default name is kite-agent.\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if fs.NArg() != 0 {
+		return "", errors.New("unexpected arguments")
+	}
+	return CanonicalServiceName(serviceName)
+}
+
+// ParseUpgrade reads upgrade flags. --apply is the worker a scheduled task runs.
+func ParseUpgrade(args []string) (UpgradeOptions, error) {
+	fs := flag.NewFlagSet("kite-agent upgrade", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var serviceName, from string
+	apply := fs.Bool("apply", false, "internal: perform the swap in this process (the scheduled task runs this)")
+	fs.StringVar(&serviceName, "service-name", "", "Windows service to upgrade (default kite-agent)")
+	fs.StringVar(&from, "from", "", "path to the new kite-agent.exe")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: kite-agent upgrade --from <new-exe> [--service-name name]\n\n")
+		fmt.Fprintf(fs.Output(), "Schedules a one-shot SYSTEM task that stops the service, copies the new\n")
+		fmt.Fprintf(fs.Output(), "executable over the installed one, and starts the service. The task keeps\n")
+		fmt.Fprintf(fs.Output(), "running if the SSH session that launched the upgrade is disconnected.\n\n")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return UpgradeOptions{}, err
+	}
+	if fs.NArg() != 0 {
+		return UpgradeOptions{}, errors.New("unexpected arguments")
+	}
+	canon, err := CanonicalServiceName(serviceName)
+	if err != nil {
+		return UpgradeOptions{}, err
+	}
+	from = strings.TrimSpace(from)
+	if from == "" {
+		return UpgradeOptions{}, errors.New("--from is required")
+	}
+	return UpgradeOptions{ServiceName: canon, From: from, Apply: *apply}, nil
+}
+
+// CanonicalServiceName accepts the default name and a short instance name.
+// Empty means the default. Names that could escape a directory are rejected.
+func CanonicalServiceName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ServiceName, nil
+	}
+	if name == "." || name == ".." || len(name) > 80 {
+		return "", fmt.Errorf("invalid Windows service name %q", name)
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_' || r == '.':
+			if i == 0 {
+				return "", fmt.Errorf("service name %q must start with a letter or digit", name)
+			}
+		default:
+			return "", fmt.Errorf("service name %q must contain only letters, digits, dots, hyphens, and underscores", name)
+		}
+	}
+	return name, nil
+}
+
+// CleansLegacyTask reports whether install should remove the old logon task.
+// Only the default instance does that, so a test install cannot delete the
+// stable service's scheduled task.
+func CleansLegacyTask(name string) bool {
+	return name == ServiceName
+}
+
+// Layout is where one Windows service instance keeps its files.
+type Layout struct {
+	Name       string
+	ConfigPath string
+	LogPath    string
+	InstallDir string
+}
+
+// InstanceLayout returns paths for a service name. The default name keeps the
+// original files. Any other name is nested under kite\<service-name> so it
+// cannot overwrite the stable exe or config.
+func InstanceLayout(name, programData, programFiles string) (Layout, error) {
+	canon, err := CanonicalServiceName(name)
+	if err != nil {
+		return Layout{}, err
+	}
+	if strings.TrimSpace(programData) == "" {
+		programData = `C:\ProgramData`
+	}
+	if strings.TrimSpace(programFiles) == "" {
+		programFiles = `C:\Program Files`
+	}
+	var cfg, dir string
+	if canon == ServiceName {
+		cfg = filepath.Join(programData, "kite", "config.yaml")
+		dir = filepath.Join(programFiles, "kite")
+	} else {
+		cfg = filepath.Join(programData, "kite", canon, "config.yaml")
+		dir = filepath.Join(programFiles, "kite", canon)
+	}
+	return Layout{
+		Name:       canon,
+		ConfigPath: cfg,
+		LogPath:    filepath.Join(filepath.Dir(cfg), logFileName),
+		InstallDir: dir,
+	}, nil
+}
+
+// DefaultLayout uses ProgramData and ProgramFiles from the environment.
+func DefaultLayout(name string) (Layout, error) {
+	return InstanceLayout(name, os.Getenv("ProgramData"), os.Getenv("ProgramFiles"))
+}
+
+// ServiceArgs is the service command line after the executable.
+// The default instance omits --service-name so an existing registration
+// stays valid. The registration key is not included.
+func ServiceArgs(configPath, serviceName string) []string {
+	args := []string{"--config", configPath}
+	if serviceName != "" && serviceName != ServiceName {
+		args = append(args, "--service-name", serviceName)
+	}
+	return args
+}
+
+// ServiceNameFromArgs reads --service-name without rejecting other flags.
+func ServiceNameFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if a == "--service-name" || a == "-service-name" {
+			if i+1 < len(args) {
+				if name, err := CanonicalServiceName(args[i+1]); err == nil {
+					return name
+				}
+			}
+			return ServiceName
+		}
+		if v, ok := strings.CutPrefix(a, "--service-name="); ok {
+			if name, err := CanonicalServiceName(v); err == nil {
+				return name
+			}
+		}
+	}
+	return ServiceName
 }
 
 // FormatStatus renders a service query for the terminal.
 func FormatStatus(s StatusInfo) string {
+	name := s.Name
+	if name == "" {
+		name = ServiceName
+	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Service: %s\n", ServiceName)
+	fmt.Fprintf(&b, "Service: %s\n", name)
 	if !s.Installed {
 		fmt.Fprintf(&b, "Installed: no\n")
-		fmt.Fprintf(&b, "Install it from an elevated prompt: kite-agent install\n")
+		if name == ServiceName {
+			fmt.Fprintf(&b, "Install it from an elevated prompt: kite-agent install\n")
+		} else {
+			fmt.Fprintf(&b, "Install it from an elevated prompt: kite-agent install --service-name %s\n", name)
+		}
 		return b.String()
 	}
 	fmt.Fprintf(&b, "Installed: yes\n")

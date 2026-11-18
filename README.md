@@ -133,7 +133,28 @@ kite-agent uninstall    # elevated; leaves the config file in place
 
 Logs are `%ProgramData%\kite\kite-agent.log`. `uninstall` does not delete the config file. Delete `%ProgramData%\kite\config.yaml` yourself to remove the registration key.
 
-If an older install registered a logon scheduled task named `kite-agent`, `install` deletes that task and deletes `start-kite-agent.cmd` from the install directory, so login no longer opens a console window.
+If an older install registered a logon scheduled task named `kite-agent`, `install` of the default service deletes that task and deletes `start-kite-agent.cmd` from the install directory, so login no longer opens a console window. A different `--service-name` does not touch that task or the default service.
+
+A second service can run beside the stable one. Give it its own name, its own `AGENT_NAME` (so the relay does not drop the tunnel you are using), and leave `--install-dir` unset unless you want a custom folder:
+
+```powershell
+$env:RELAY_ADDR = "wss://tunnel.example.com/agent"
+$env:REGISTRATION_KEY = "CHANGE_ME"
+$env:AGENT_NAME = "my-pc-test"
+.\kite-agent.exe install --service-name kite-agent-test
+.\kite-agent.exe status --service-name kite-agent-test
+```
+
+That instance is service `kite-agent-test`. Its exe is `%ProgramFiles%\kite\kite-agent-test\kite-agent.exe`, its config is `%ProgramData%\kite\kite-agent-test\config.yaml`, and its log is `%ProgramData%\kite\kite-agent-test\kite-agent.log`. `start`, `stop`, `restart`, and `uninstall` take the same `--service-name` and do not stop `kite-agent`.
+
+To replace the binary of a running instance without relying on the SSH session that came in through it:
+
+```powershell
+.\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
+.\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe --service-name kite-agent-test
+```
+
+`upgrade` returns after it has registered a one-shot task that runs as SYSTEM. That task stops the named service, copies the new exe over the installed one, and starts the service. The SSH session can disconnect when the tunnel restarts; the task is not part of that session and still finishes. The result is `%ProgramData%\kite\upgrade.log` for the default service, or `%ProgramData%\kite\<service-name>\upgrade.log` for another instance. The file has paths and errors, not the registration key.
 
 `deploy/install-kite-agent.ps1` is optional. It requires an elevated session and calls `kite-agent install`. It does not register a scheduled task and it does not write a command wrapper.
 
@@ -353,7 +374,28 @@ kite-agent uninstall    # 需要提升权限；配置文件会留下来
 
 日志是 `%ProgramData%\kite\kite-agent.log`。`uninstall` 不删除配置文件。要去掉注册密钥，请自行删除 `%ProgramData%\kite\config.yaml`。
 
-如果以前注册过名为 `kite-agent` 的登录计划任务，`install` 会删掉它，并删除安装目录里的 `start-kite-agent.cmd`，这样登录时不会再弹出控制台窗口。
+如果以前注册过名为 `kite-agent` 的登录计划任务，只有安装默认服务时才会删掉它，并删除安装目录里的 `start-kite-agent.cmd`，这样登录时不会再弹出控制台窗口。其它 `--service-name` 不会动这个任务，也不会动默认服务。
+
+可以在稳定服务旁边再装一个实例。给它单独的服务名，以及单独的 `AGENT_NAME`（避免中继踢掉你正在用的那条隧道）。不要随便传 `--install-dir`，除非你想指定目录：
+
+```powershell
+$env:RELAY_ADDR = "wss://tunnel.example.com/agent"
+$env:REGISTRATION_KEY = "CHANGE_ME"
+$env:AGENT_NAME = "my-pc-test"
+.\kite-agent.exe install --service-name kite-agent-test
+.\kite-agent.exe status --service-name kite-agent-test
+```
+
+这个实例的服务名是 `kite-agent-test`。程序在 `%ProgramFiles%\kite\kite-agent-test\kite-agent.exe`，配置在 `%ProgramData%\kite\kite-agent-test\config.yaml`，日志在 `%ProgramData%\kite\kite-agent-test\kite-agent.log`。`start`、`stop`、`restart`、`uninstall` 使用同一个 `--service-name`，不会停掉 `kite-agent`。
+
+如果要在这条隧道上换掉正在提供隧道的那个程序，而 SSH 会话可能在服务重启时断开：
+
+```powershell
+.\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe
+.\kite-agent.exe upgrade --from C:\path\to\new\kite-agent.exe --service-name kite-agent-test
+```
+
+`upgrade` 注册一个以 SYSTEM 运行的一次性任务后就返回。任务会停掉指定的服务、用新程序覆盖已安装的 exe，再把服务拉起来。SSH 会话可以在隧道重启时断开；任务不在那个会话里，仍会做完。默认服务的结果写在 `%ProgramData%\kite\upgrade.log`，其它实例写在 `%ProgramData%\kite\<service-name>\upgrade.log`。文件里只有路径和错误，没有注册密钥。
 
 `deploy/install-kite-agent.ps1` 是可选的。它要求提升后的会话，然后调用 `kite-agent install`。它不会注册计划任务，也不会写包装脚本。
 

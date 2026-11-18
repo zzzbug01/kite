@@ -46,7 +46,7 @@ func TestSplit(t *testing.T) {
 
 func TestUsageMentionsServiceNotScheduledTask(t *testing.T) {
 	text := Usage()
-	for _, want := range []string{"kite-agent status", "kite-agent install", `%ProgramData%\kite\config.yaml`, "console window"} {
+	for _, want := range []string{"kite-agent status", "kite-agent install", "--service-name", "kite-agent upgrade", `%ProgramData%\kite\config.yaml`, "console window"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("usage missing %q", want)
 		}
@@ -266,11 +266,12 @@ func TestControlPlaneOffWindows(t *testing.T) {
 	}
 	for name, err := range map[string]error{
 		"install":   Install(Options{}),
-		"uninstall": Uninstall(),
-		"start":     Start(),
-		"stop":      Stop(),
-		"restart":   Restart(),
-		"service":   Serve(nil),
+		"uninstall": Uninstall(""),
+		"start":     Start(""),
+		"stop":      Stop(""),
+		"restart":   Restart(""),
+		"service":   Serve("", nil),
+		"upgrade":   Upgrade(UpgradeOptions{From: "kite-agent.exe"}),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "Windows") {
 			t.Fatalf("%s: %v", name, err)
@@ -283,7 +284,7 @@ func TestControlPlaneOffWindows(t *testing.T) {
 			t.Fatalf("%s should not send operators back to a scheduled task: %v", name, err)
 		}
 	}
-	text, err := Status()
+	text, err := Status("")
 	if err == nil || text != "" || !strings.Contains(err.Error(), "status") {
 		t.Fatalf("%q %v", text, err)
 	}
@@ -314,6 +315,112 @@ func TestOpenLogAppend(t *testing.T) {
 	}
 	if string(b) != "one\ntwo\n" {
 		t.Fatalf("%q", b)
+	}
+}
+
+func TestInstanceLayout(t *testing.T) {
+	def, err := InstanceLayout("", `C:\ProgramData`, `C:\Program Files`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Name != ServiceName {
+		t.Fatal(def.Name)
+	}
+	if def.ConfigPath != filepath.Join(`C:\ProgramData`, "kite", "config.yaml") || def.LogPath != filepath.Join(`C:\ProgramData`, "kite", "kite-agent.log") {
+		t.Fatal(def)
+	}
+	if def.InstallDir != filepath.Join(`C:\Program Files`, "kite") {
+		t.Fatal(def.InstallDir)
+	}
+	testInst, err := InstanceLayout("kite-agent-test", `C:\ProgramData`, `C:\Program Files`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if testInst.ConfigPath != filepath.Join(`C:\ProgramData`, "kite", "kite-agent-test", "config.yaml") {
+		t.Fatal(testInst.ConfigPath)
+	}
+	if testInst.LogPath != filepath.Join(`C:\ProgramData`, "kite", "kite-agent-test", "kite-agent.log") {
+		t.Fatal(testInst.LogPath)
+	}
+	if testInst.InstallDir != filepath.Join(`C:\Program Files`, "kite", "kite-agent-test") {
+		t.Fatal(testInst.InstallDir)
+	}
+	if testInst.InstallDir == def.InstallDir || testInst.ConfigPath == def.ConfigPath {
+		t.Fatal("test instance overwrites the default files")
+	}
+	if _, err := InstanceLayout(`kite\agent`, `C:\ProgramData`, `C:\Program Files`); err == nil {
+		t.Fatal("path separator should be rejected")
+	}
+	if CleansLegacyTask("kite-agent-test") {
+		t.Fatal("test install must not remove the legacy task")
+	}
+	if !CleansLegacyTask(ServiceName) {
+		t.Fatal("default install cleans the legacy task")
+	}
+	defCfg := filepath.Join(`C:\ProgramData`, "kite", "config.yaml")
+	if strings.Join(ServiceArgs(defCfg, ServiceName), " ") != "--config "+defCfg {
+		t.Fatal(ServiceArgs(defCfg, ServiceName))
+	}
+	got := ServiceArgs(testInst.ConfigPath, testInst.Name)
+	if len(got) != 4 || got[2] != "--service-name" || got[3] != "kite-agent-test" {
+		t.Fatal(got)
+	}
+}
+
+func TestUpgradeCommand(t *testing.T) {
+	if _, err := ParseUpgrade(nil); err == nil {
+		t.Fatal("expected --from")
+	}
+	opt, err := ParseUpgrade([]string{"--from", `D:\new\kite-agent.exe`, "--service-name", "kite-agent-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.Apply || opt.ServiceName != "kite-agent-test" || opt.From != `D:\new\kite-agent.exe` {
+		t.Fatalf("%+v", opt)
+	}
+	task := UpgradeTaskName(opt.ServiceName)
+	if task == ServiceName || !strings.Contains(task, "kite-agent-test") {
+		t.Fatal(task)
+	}
+	xmlText, err := UpgradeTaskXML(`D:\new\kite-agent.exe`, opt.From, opt.ServiceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"S-1-5-18", "upgrade --apply", "kite-agent-test", `D:\new\kite-agent.exe`, "ServiceAccount"} {
+		if !strings.Contains(xmlText, want) {
+			t.Fatalf("xml missing %q\n%s", want, xmlText)
+		}
+	}
+	if strings.Contains(xmlText, "REGISTRATION_KEY") || strings.Contains(xmlText, "registration_key") {
+		t.Fatal(xmlText)
+	}
+	quoted := quoteWindowsArg(`C:\Program Files\kite\kite-agent.exe`)
+	if quoted != `"C:\Program Files\kite\kite-agent.exe"` {
+		t.Fatal(quoted)
+	}
+	lay, err := InstanceLayout(ServiceName, `C:\ProgramData`, `C:\Program Files`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if UpgradeResultFile(lay) != filepath.Join(`C:\ProgramData`, "kite", "upgrade.log") {
+		t.Fatal(UpgradeResultFile(lay))
+	}
+}
+
+func TestParseControlServiceName(t *testing.T) {
+	name, err := ParseControl("status", []string{"--service-name", "kite-agent-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "kite-agent-test" {
+		t.Fatal(name)
+	}
+	name, err = ParseControl("stop", nil)
+	if err != nil || name != ServiceName {
+		t.Fatalf("%s %v", name, err)
+	}
+	if _, err := ParseControl("start", []string{"--service-name", `..\kite-agent`}); err == nil {
+		t.Fatal("expected rejection")
 	}
 }
 

@@ -29,7 +29,8 @@ param(
     [string]$RegistrationKey = "CHANGE_ME",
     [string]$AgentName = "my-pc",
     [string]$LocalSSHAddr = "127.0.0.1:22",
-    [string]$ConfigPath = ""
+    [string]$ConfigPath = "",
+    [string]$ServiceName = "kite-agent"
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,7 +79,17 @@ $env:REGISTRATION_KEY = $RegistrationKey
 $env:AGENT_NAME = $AgentName
 $env:LOCAL_SSH_ADDR = $LocalSSHAddr
 
-$installArgs = @("install", "--install-dir", $InstallDir)
+if ([string]::IsNullOrWhiteSpace($ServiceName)) {
+    Write-Error "Pass -ServiceName. The default is kite-agent. Another name installs a separate service."
+}
+
+# Pass -InstallDir only when the caller set it. Otherwise kite-agent chooses
+# %ProgramFiles%\kite for the default name and %ProgramFiles%\kite\<name> for
+# any other name, so a test install does not overwrite the stable exe.
+$installArgs = @("install", "--service-name", $ServiceName)
+if ($PSBoundParameters.ContainsKey("InstallDir")) {
+    $installArgs += @("--install-dir", $InstallDir)
+}
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     $installArgs += @("--config", $ConfigPath)
 }

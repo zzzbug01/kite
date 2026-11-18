@@ -18,8 +18,6 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
-
-	"github.com/zzzbug01/kite/internal/config"
 )
 
 const (
@@ -87,32 +85,41 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, changes chan<-
 }
 
 // Serve runs fn as the service handler until the SCM asks the process to stop.
-func Serve(fn func(context.Context) error) error {
-	elog := openEventLog()
+// name is the service the SCM launched. The default is kite-agent.
+func Serve(name string, fn func(context.Context) error) error {
+	name, err := CanonicalServiceName(name)
+	if err != nil {
+		return err
+	}
+	elog := openEventLog(name)
 	if elog != nil {
-		_ = elog.Info(1, "kite-agent service starting")
+		_ = elog.Info(1, name+" service starting")
 		defer elog.Close()
 	}
-	err := svc.Run(ServiceName, &handler{run: fn})
+	err = svc.Run(name, &handler{run: fn})
 	if err != nil {
 		if elog != nil {
-			_ = elog.Error(1, "kite-agent service failed: "+clip(err.Error()))
+			_ = elog.Error(1, name+" service failed: "+clip(err.Error()))
 		}
 		return err
 	}
 	if elog != nil {
-		_ = elog.Info(1, "kite-agent service stopped")
+		_ = elog.Info(1, name+" service stopped")
 	}
 	return nil
 }
 
 // LogServiceError writes a configuration or startup error to the Application
 // event log. The service has no console, so this is the record Event Viewer shows.
-func LogServiceError(err error) {
+func LogServiceError(name string, err error) {
 	if err == nil {
 		return
 	}
-	elog := openEventLog()
+	name, nerr := CanonicalServiceName(name)
+	if nerr != nil {
+		name = ServiceName
+	}
+	elog := openEventLog(name)
 	if elog == nil {
 		return
 	}
@@ -120,8 +127,8 @@ func LogServiceError(err error) {
 	_ = elog.Error(1, clip(err.Error()))
 }
 
-func openEventLog() *eventlog.Log {
-	elog, err := eventlog.Open(ServiceName)
+func openEventLog(name string) *eventlog.Log {
+	elog, err := eventlog.Open(name)
 	if err != nil {
 		return nil
 	}
@@ -135,15 +142,23 @@ func clip(s string) string {
 	return s
 }
 
-// Install writes the service config, registers kite-agent, and starts it.
+// Install writes the service config, registers one instance, and starts it.
 func Install(opt Options) error {
 	if err := requireAdmin(); err != nil {
+		return err
+	}
+	name, err := CanonicalServiceName(opt.ServiceName)
+	if err != nil {
 		return err
 	}
 	if err := rejectPlaceholderRelay(opt.Config.RelayAddr); err != nil {
 		return err
 	}
-	configPath, err := serviceConfigPath(opt.ConfigPath)
+	lay, err := DefaultLayout(name)
+	if err != nil {
+		return err
+	}
+	configPath, err := serviceConfigPath(opt.ConfigPath, lay)
 	if err != nil {
 		return err
 	}
@@ -154,11 +169,12 @@ func Install(opt Options) error {
 	if err != nil {
 		return err
 	}
-	installDir := opt.InstallDir
-	if strings.TrimSpace(installDir) == "" {
-		installDir = defaultInstallDir()
+	installDir := strings.TrimSpace(opt.InstallDir)
+	if installDir == "" {
+		installDir = lay.InstallDir
 	}
 	dest := filepath.Join(installDir, "kite-agent.exe")
+	logPath := filepath.Join(filepath.Dir(configPath), logFileName)
 
 	m, err := connectSCM(windows.SC_MANAGER_ALL_ACCESS)
 	if err != nil {
@@ -167,7 +183,7 @@ func Install(opt Options) error {
 	defer m.Disconnect()
 
 	existed := true
-	s, err := openService(m, windows.SERVICE_ALL_ACCESS)
+	s, err := openService(m, name, windows.SERVICE_ALL_ACCESS)
 	if err != nil {
 		if !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 			return fmt.Errorf("open service: %w", err)
@@ -193,40 +209,48 @@ func Install(opt Options) error {
 		}
 	}
 	copyOptionalSibling(exe, installDir, "kite.exe")
-	removedTask := removeLegacyLogonTask()
+	removedTask := false
 	removedWrapper := false
-	if err := os.Remove(filepath.Join(installDir, "start-kite-agent.cmd")); err == nil {
-		removedWrapper = true
+	if CleansLegacyTask(name) {
+		removedTask = removeLegacyLogonTask()
+		if err := os.Remove(filepath.Join(installDir, "start-kite-agent.cmd")); err == nil {
+			removedWrapper = true
+		}
 	}
 
+	args := ServiceArgs(configPath, name)
+	binPath := windowsCommandLine(dest, args...)
 	if s == nil {
-		created, err := m.CreateService(ServiceName, dest, serviceConfig(), "--config", configPath)
+		created, err := m.CreateService(name, dest, serviceConfig(name), args...)
 		if err != nil {
 			if errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
-				return fmt.Errorf("service %s is marked for deletion; wait a moment and run kite-agent install again", ServiceName)
+				return fmt.Errorf("service %s is marked for deletion; wait a moment and run kite-agent install again", name)
 			}
 			return fmt.Errorf("create service: %w", err)
 		}
 		s = created
 		defer s.Close()
-	} else if err := s.UpdateConfig(serviceConfigWithPath(windowsCommandLine(dest, configPath))); err != nil {
+	} else if err := s.UpdateConfig(serviceConfigWithPath(name, binPath)); err != nil {
 		return fmt.Errorf("update service: %w", err)
 	}
 	warnRecovery(s)
-	installEventSource()
+	installEventSource(name)
 
-	if err := startAndWait(s); err != nil {
-		return fmt.Errorf("service %s is installed but did not stay running: %w\nLog: %s", ServiceName, err, filepath.Join(filepath.Dir(configPath), logFileName))
+	if err := startAndWait(s, logPath); err != nil {
+		return fmt.Errorf("service %s is installed but did not stay running: %w\nLog: %s", name, err, logPath)
 	}
 
-	fmt.Printf("Installed service %s.\n", ServiceName)
+	fmt.Printf("Installed service %s.\n", name)
 	fmt.Printf("Binary: %s\n", dest)
 	fmt.Printf("Config: %s\n", configPath)
-	fmt.Printf("Log: %s\n", filepath.Join(filepath.Dir(configPath), logFileName))
+	fmt.Printf("Log: %s\n", logPath)
 	fmt.Printf("Start type: automatic (delayed)\n")
 	fmt.Printf("Account: LocalSystem\n")
 	fmt.Printf("State: running\n")
 	fmt.Printf("The service starts at boot, without a logged-on user, and does not open a console window.\n")
+	if name != ServiceName {
+		fmt.Printf("Left service %s unchanged.\n", ServiceName)
+	}
 	if !existed {
 		fmt.Printf("Created a new service.\n")
 	}
@@ -239,8 +263,12 @@ func Install(opt Options) error {
 	return nil
 }
 
-// Uninstall removes the service and leaves the config file on disk.
-func Uninstall() error {
+// Uninstall removes one service and leaves its config file on disk.
+func Uninstall(name string) error {
+	name, err := CanonicalServiceName(name)
+	if err != nil {
+		return err
+	}
 	if err := requireAdmin(); err != nil {
 		return err
 	}
@@ -249,10 +277,10 @@ func Uninstall() error {
 		return err
 	}
 	defer m.Disconnect()
-	s, err := openService(m, windows.SERVICE_ALL_ACCESS)
+	s, err := openService(m, name, windows.SERVICE_ALL_ACCESS)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-			fmt.Printf("Service %s is not installed.\n", ServiceName)
+			fmt.Printf("Service %s is not installed.\n", name)
 			return nil
 		}
 		return fmt.Errorf("open service: %w", err)
@@ -265,11 +293,13 @@ func Uninstall() error {
 	if err := s.Delete(); err != nil {
 		return fmt.Errorf("delete service: %w", err)
 	}
-	_ = eventlog.Remove(ServiceName)
-	fmt.Printf("Removed Windows service %s.\n", ServiceName)
+	_ = eventlog.Remove(name)
+	fmt.Printf("Removed Windows service %s.\n", name)
 	cfg := info.Config
 	if cfg == "" {
-		cfg = config.WindowsMachineConfig()
+		if lay, lerr := DefaultLayout(name); lerr == nil {
+			cfg = lay.ConfigPath
+		}
 	}
 	fmt.Printf("The registration key was left on disk. Delete this file to remove it:\n  %s\n", cfg)
 	if info.Binary != "" {
@@ -278,72 +308,76 @@ func Uninstall() error {
 	return nil
 }
 
-// Start starts the service.
-func Start() error {
-	return withMutatingService(func(s *mgr.Service) error {
+// Start starts one service.
+func Start(name string) error {
+	return withMutatingService(name, func(s *mgr.Service) error {
 		st, err := s.Query()
 		if err != nil {
 			return err
 		}
 		if st.State == svc.Running {
-			fmt.Printf("%s is already running.\n", ServiceName)
+			fmt.Printf("%s is already running.\n", s.Name)
 			return printStatus(s)
 		}
-		if err := startAndWait(s); err != nil {
+		if err := startAndWait(s, logPathFor(s)); err != nil {
 			return err
 		}
-		fmt.Printf("Started %s.\n", ServiceName)
+		fmt.Printf("Started %s.\n", s.Name)
 		return printStatus(s)
 	})
 }
 
-// Stop stops the service.
-func Stop() error {
-	return withMutatingService(func(s *mgr.Service) error {
+// Stop stops one service.
+func Stop(name string) error {
+	return withMutatingService(name, func(s *mgr.Service) error {
 		st, err := s.Query()
 		if err != nil {
 			return err
 		}
 		if st.State == svc.Stopped {
-			fmt.Printf("%s is already stopped.\n", ServiceName)
+			fmt.Printf("%s is already stopped.\n", s.Name)
 			return nil
 		}
 		if err := requestStop(s); err != nil {
 			return err
 		}
-		fmt.Printf("Stopped %s.\n", ServiceName)
+		fmt.Printf("Stopped %s.\n", s.Name)
 		return nil
 	})
 }
 
-// Restart stops the service if it is running, then starts it.
-func Restart() error {
-	return withMutatingService(func(s *mgr.Service) error {
+// Restart stops one service if it is running, then starts it.
+func Restart(name string) error {
+	return withMutatingService(name, func(s *mgr.Service) error {
 		if err := requestStop(s); err != nil {
 			return err
 		}
-		if err := startAndWait(s); err != nil {
+		if err := startAndWait(s, logPathFor(s)); err != nil {
 			return err
 		}
-		fmt.Printf("Restarted %s.\n", ServiceName)
+		fmt.Printf("Restarted %s.\n", s.Name)
 		return printStatus(s)
 	})
 }
 
-// Status reports the service state. It does not need an elevated prompt.
-func Status() (string, error) {
+// Status reports one service. It does not need an elevated prompt.
+func Status(name string) (string, error) {
+	name, err := CanonicalServiceName(name)
+	if err != nil {
+		return "", err
+	}
 	m, err := connectSCM(windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return "", err
 	}
 	defer m.Disconnect()
-	s, err := openService(m, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
+	s, err := openService(m, name, windows.SERVICE_QUERY_STATUS|windows.SERVICE_QUERY_CONFIG)
 	if err != nil && errors.Is(err, windows.ERROR_ACCESS_DENIED) {
-		s, err = openService(m, windows.SERVICE_QUERY_STATUS)
+		s, err = openService(m, name, windows.SERVICE_QUERY_STATUS)
 	}
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-			return FormatStatus(StatusInfo{}), nil
+			return FormatStatus(StatusInfo{Name: name}), nil
 		}
 		return "", fmt.Errorf("open service: %w", err)
 	}
@@ -364,7 +398,11 @@ func printStatus(s *mgr.Service) error {
 	return nil
 }
 
-func withMutatingService(fn func(*mgr.Service) error) error {
+func withMutatingService(name string, fn func(*mgr.Service) error) error {
+	name, err := CanonicalServiceName(name)
+	if err != nil {
+		return err
+	}
 	if err := requireAdmin(); err != nil {
 		return err
 	}
@@ -374,10 +412,10 @@ func withMutatingService(fn func(*mgr.Service) error) error {
 	}
 	defer m.Disconnect()
 	access := uint32(windows.SERVICE_QUERY_STATUS | windows.SERVICE_QUERY_CONFIG | windows.SERVICE_START | windows.SERVICE_STOP)
-	s, err := openService(m, access)
+	s, err := openService(m, name, access)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-			return fmt.Errorf("service %s is not installed; run kite-agent install from an elevated prompt", ServiceName)
+			return fmt.Errorf("service %s is not installed; run kite-agent install --service-name %s from an elevated prompt", name, name)
 		}
 		return fmt.Errorf("open service: %w", err)
 	}
@@ -385,17 +423,31 @@ func withMutatingService(fn func(*mgr.Service) error) error {
 	return fn(s)
 }
 
+func logPathFor(s *mgr.Service) string {
+	info, err := readStatus(s)
+	if err == nil && info.Log != "" {
+		return info.Log
+	}
+	lay, err := DefaultLayout(s.Name)
+	if err != nil {
+		return ""
+	}
+	return lay.LogPath
+}
+
 func readStatus(s *mgr.Service) (StatusInfo, error) {
 	st, err := s.Query()
 	if err != nil {
 		return StatusInfo{}, err
 	}
+	lay, _ := DefaultLayout(s.Name)
 	info := StatusInfo{
+		Name:      s.Name,
 		Installed: true,
 		State:     stateName(st.State),
 		PID:       st.ProcessId,
-		Log:       DefaultLogPath(),
-		Config:    config.WindowsMachineConfig(),
+		Log:       lay.LogPath,
+		Config:    lay.ConfigPath,
 	}
 	if st.State == svc.Stopped && st.Win32ExitCode != 0 && st.Win32ExitCode != uint32(windows.ERROR_SERVICE_NEVER_STARTED) {
 		info.ExitCode = st.Win32ExitCode
@@ -408,7 +460,7 @@ func readStatus(s *mgr.Service) (StatusInfo, error) {
 	info.Account = accountName(cfg.ServiceStartName)
 	info.Binary, info.Config = parseServiceCommand(cfg.BinaryPathName)
 	if info.Config == "" {
-		info.Config = config.WindowsMachineConfig()
+		info.Config = lay.ConfigPath
 	}
 	if info.Config != "" {
 		info.Log = filepath.Join(filepath.Dir(info.Config), logFileName)
@@ -416,9 +468,13 @@ func readStatus(s *mgr.Service) (StatusInfo, error) {
 	return info, nil
 }
 
-func serviceConfig() mgr.Config {
+func serviceConfig(name string) mgr.Config {
+	disp := displayName
+	if name != ServiceName {
+		disp = displayName + " (" + name + ")"
+	}
 	return mgr.Config{
-		DisplayName:      displayName,
+		DisplayName:      disp,
 		Description:      description,
 		StartType:        mgr.StartAutomatic,
 		ServiceType:      windows.SERVICE_WIN32_OWN_PROCESS,
@@ -427,24 +483,28 @@ func serviceConfig() mgr.Config {
 	}
 }
 
-func serviceConfigWithPath(binary string) mgr.Config {
-	cfg := serviceConfig()
+func serviceConfigWithPath(name, binary string) mgr.Config {
+	cfg := serviceConfig(name)
 	cfg.BinaryPathName = binary
 	return cfg
 }
 
-func windowsCommandLine(exe, configPath string) string {
-	return syscall.EscapeArg(exe) + " " + syscall.EscapeArg("--config") + " " + syscall.EscapeArg(configPath)
+func windowsCommandLine(exe string, args ...string) string {
+	parts := make([]string, 0, 1+len(args))
+	parts = append(parts, syscall.EscapeArg(exe))
+	for _, arg := range args {
+		parts = append(parts, syscall.EscapeArg(arg))
+	}
+	return strings.Join(parts, " ")
 }
 
-func serviceConfigPath(explicit string) (string, error) {
+func serviceConfigPath(explicit string, lay Layout) (string, error) {
 	explicit = strings.TrimSpace(explicit)
 	if explicit == "" {
-		p := config.WindowsMachineConfig()
-		if p == "" {
+		if lay.ConfigPath == "" {
 			return "", errors.New("no Windows config path")
 		}
-		return p, nil
+		return lay.ConfigPath, nil
 	}
 	if !filepath.IsAbs(explicit) {
 		abs, err := filepath.Abs(explicit)
@@ -454,17 +514,9 @@ func serviceConfigPath(explicit string) (string, error) {
 		explicit = abs
 	}
 	if pathInUserProfile(explicit) {
-		return "", fmt.Errorf("--config %s is inside a user profile; the service runs as LocalSystem and does not load that profile. Omit --config to write %%ProgramData%%\\kite\\config.yaml, or pass a path outside the profile", explicit)
+		return "", fmt.Errorf("--config %s is inside a user profile; the service runs as LocalSystem and does not load that profile. Omit --config to write %s, or pass a path outside the profile", explicit, lay.ConfigPath)
 	}
 	return explicit, nil
-}
-
-func defaultInstallDir() string {
-	root := strings.TrimSpace(os.Getenv("ProgramFiles"))
-	if root == "" {
-		root = `C:\Program Files`
-	}
-	return filepath.Join(root, "kite")
 }
 
 func currentExe() (string, error) {
@@ -494,16 +546,16 @@ func connectSCM(access uint32) (*mgr.Mgr, error) {
 	return &mgr.Mgr{Handle: h}, nil
 }
 
-func openService(m *mgr.Mgr, access uint32) (*mgr.Service, error) {
-	name, err := syscall.UTF16PtrFromString(ServiceName)
+func openService(m *mgr.Mgr, name string, access uint32) (*mgr.Service, error) {
+	namePtr, err := syscall.UTF16PtrFromString(name)
 	if err != nil {
 		return nil, err
 	}
-	h, err := windows.OpenService(m.Handle, name, access)
+	h, err := windows.OpenService(m.Handle, namePtr, access)
 	if err != nil {
 		return nil, elevate(err)
 	}
-	return &mgr.Service{Name: ServiceName, Handle: h}, nil
+	return &mgr.Service{Name: name, Handle: h}, nil
 }
 
 func elevate(err error) error {
@@ -540,7 +592,7 @@ func requestStop(s *mgr.Service) error {
 	}
 }
 
-func startAndWait(s *mgr.Service) error {
+func startAndWait(s *mgr.Service, logPath string) error {
 	st, err := s.Query()
 	if err != nil {
 		return err
@@ -567,9 +619,9 @@ func startAndWait(s *mgr.Service) error {
 			return nil
 		case svc.Stopped:
 			if st.Win32ExitCode != 0 {
-				return fmt.Errorf("service stopped (exit %d); see %s", st.Win32ExitCode, DefaultLogPath())
+				return fmt.Errorf("service stopped (exit %d); see %s", st.Win32ExitCode, logPath)
 			}
-			return fmt.Errorf("service stopped; see %s", DefaultLogPath())
+			return fmt.Errorf("service stopped; see %s", logPath)
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting to run (state %s)", stateName(st.State))
@@ -608,8 +660,8 @@ func warnRecovery(s *mgr.Service) {
 	}
 }
 
-func installEventSource() {
-	err := eventlog.InstallAsEventCreate(ServiceName, eventlog.Error|eventlog.Warning|eventlog.Info)
+func installEventSource(name string) {
+	err := eventlog.InstallAsEventCreate(name, eventlog.Error|eventlog.Warning|eventlog.Info)
 	if err != nil && !strings.Contains(err.Error(), "already exists") {
 		fmt.Fprintf(os.Stderr, "kite-agent: event log source not installed: %s\n", err)
 	}

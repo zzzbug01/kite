@@ -51,35 +51,49 @@ func run(args []string) error {
 		}
 		return agentsvc.Install(opt)
 	case agentsvc.CmdUninstall:
-		if err := rejectExtra(rest); err != nil {
+		name, done, err := controlName("uninstall", rest)
+		if done || err != nil {
 			return err
 		}
-		return agentsvc.Uninstall()
+		return agentsvc.Uninstall(name)
 	case agentsvc.CmdStart:
-		if err := rejectExtra(rest); err != nil {
+		name, done, err := controlName("start", rest)
+		if done || err != nil {
 			return err
 		}
-		return agentsvc.Start()
+		return agentsvc.Start(name)
 	case agentsvc.CmdStop:
-		if err := rejectExtra(rest); err != nil {
+		name, done, err := controlName("stop", rest)
+		if done || err != nil {
 			return err
 		}
-		return agentsvc.Stop()
+		return agentsvc.Stop(name)
 	case agentsvc.CmdRestart:
-		if err := rejectExtra(rest); err != nil {
+		name, done, err := controlName("restart", rest)
+		if done || err != nil {
 			return err
 		}
-		return agentsvc.Restart()
+		return agentsvc.Restart(name)
 	case agentsvc.CmdStatus:
-		if err := rejectExtra(rest); err != nil {
+		name, done, err := controlName("status", rest)
+		if done || err != nil {
 			return err
 		}
-		text, err := agentsvc.Status()
+		text, err := agentsvc.Status(name)
 		if err != nil {
 			return err
 		}
 		fmt.Fprint(os.Stdout, text)
 		return nil
+	case agentsvc.CmdUpgrade:
+		opt, err := agentsvc.ParseUpgrade(rest)
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return agentsvc.Upgrade(opt)
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", cmd, agentsvc.Usage())
 	}
@@ -96,6 +110,18 @@ func help(args []string) error {
 			return err
 		case "run":
 			_, err := agentsvc.ParseOptions([]string{"-h"}, false)
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		case "upgrade":
+			_, err := agentsvc.ParseUpgrade([]string{"-h"})
+			if errors.Is(err, flag.ErrHelp) {
+				return nil
+			}
+			return err
+		case "status", "start", "stop", "restart", "uninstall":
+			_, err := agentsvc.ParseControl(strings.ToLower(args[0]), []string{"-h"})
 			if errors.Is(err, flag.ErrHelp) {
 				return nil
 			}
@@ -121,19 +147,15 @@ func ready(args []string, install bool) (agentsvc.Options, bool, error) {
 	return opt, false, nil
 }
 
-func rejectExtra(args []string) error {
-	fs := flag.NewFlagSet("kite-agent", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), agentsvc.Usage())
+func controlName(command string, args []string) (string, bool, error) {
+	name, err := agentsvc.ParseControl(command, args)
+	if errors.Is(err, flag.ErrHelp) {
+		return "", true, nil
 	}
-	if err := fs.Parse(args); err != nil {
-		return err
+	if err != nil {
+		return "", false, err
 	}
-	if fs.NArg() != 0 {
-		return errors.New("unexpected arguments")
-	}
-	return nil
+	return name, false, nil
 }
 
 func runForeground(args []string) error {
@@ -148,9 +170,10 @@ func runForeground(args []string) error {
 }
 
 func runService(args []string) error {
+	serviceName := agentsvc.ServiceNameFromArgs(args)
 	logPath := agentsvc.LogPath(config.PeekConfigFlag(args))
 	if f, err := agentsvc.OpenLog(logPath); err != nil {
-		agentsvc.LogServiceError(fmt.Errorf("open log %s: %w", logPath, err))
+		agentsvc.LogServiceError(serviceName, fmt.Errorf("open log %s: %w", logPath, err))
 	} else {
 		defer f.Close()
 		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -158,15 +181,15 @@ func runService(args []string) error {
 	opt, err := agentsvc.ParseOptions(args, false)
 	if err != nil {
 		slog.Error("kite-agent configuration", "err", err)
-		agentsvc.LogServiceError(err)
+		agentsvc.LogServiceError(serviceName, err)
 		return err
 	}
 	if opt.ShowVersion {
 		fmt.Printf("kite-agent %s\n", version.Version)
 		return nil
 	}
-	slog.Info("kite-agent service starting", "version", version.Version, "name", opt.Config.Name, "local", opt.Config.LocalSSHAddr)
-	return agentsvc.Serve(func(ctx context.Context) error {
+	slog.Info("kite-agent service starting", "version", version.Version, "name", opt.Config.Name, "local", opt.Config.LocalSSHAddr, "service", opt.ServiceName)
+	return agentsvc.Serve(opt.ServiceName, func(ctx context.Context) error {
 		return runAgent(ctx, opt)
 	})
 }
