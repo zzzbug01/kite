@@ -13,6 +13,12 @@ import (
 // become a single hyphen.
 func SanitizeHostname(host string) string {
 	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".")
+	// Drop the domain. "macbook-pro.local" and "macbook-pro.example.com"
+	// both become "macbook-pro".
+	if i := strings.IndexByte(host, '.'); i > 0 {
+		host = host[:i]
+	}
 	var b strings.Builder
 	dash := false
 	for _, r := range host {

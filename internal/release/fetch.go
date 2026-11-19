@@ -74,6 +74,9 @@ func (c *Client) Select(ctx context.Context, version string) (Release, error) {
 		}
 		one, err := c.byTag(ctx, version)
 		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return Release{}, fmt.Errorf("release %s was not found", version)
+			}
 			return Release{}, err
 		}
 		if one.Draft {
@@ -313,23 +316,116 @@ func looksNumeric(s string) bool {
 // SameVersion reports whether current and tag name the same release.
 // "dev" and a non-tag build do not match a release tag.
 func SameVersion(current, tag string) bool {
-	c := canonTag(current)
-	t := canonTag(tag)
-	return c != "" && c == t
-}
-
-// Older reports whether current is an older semver than latest.
-// A current value that is not a semver (dev, a git SHA) is older.
-func Older(current, latest string) bool {
-	if SameVersion(current, latest) {
+	c, okC := parseBuild(current)
+	t, okT := parseBuild(tag)
+	if !okC || !okT {
 		return false
 	}
-	c, okC := parseSemver(current)
-	l, okL := parseSemver(latest)
+	return !buildLess(c, t) && !buildLess(t, c)
+}
+
+// KnownBuild reports whether current is a semver tag or a git-describe
+// version (tag-N-gHASH). "dev" and a bare git SHA are not known builds.
+func KnownBuild(current string) bool {
+	_, ok := parseBuild(current)
+	return ok
+}
+
+// Older reports whether current is an older build than latest.
+// Unknown builds (dev, a bare SHA) are not older; callers must not
+// auto-upgrade them.
+func Older(current, latest string) bool {
+	c, okC := parseBuild(current)
+	l, okL := parseBuild(latest)
 	if !okC || !okL {
+		return false
+	}
+	return buildLess(c, l)
+}
+
+// SupportsAgentToken reports whether a release understands install-code
+// agent tokens. Those tokens arrived after v0.1.0-rc.3.
+func SupportsAgentToken(version string) bool {
+	cur, ok := parseBuild(version)
+	if !ok {
 		return true
 	}
-	return semverLess(c, l)
+	limit, ok := parseBuild("v0.1.0-rc.3")
+	if !ok {
+		return true
+	}
+	return buildLess(limit, cur)
+}
+
+// build is a semver tag plus how many commits git-describe added after it.
+// A describe version is newer than its base tag and older than the next tag.
+type build struct {
+	sem     semver
+	commits int
+}
+
+func parseBuild(s string) (build, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "dev" || isHexSHA(s) {
+		return build{}, false
+	}
+	if base, n, ok := splitDescribe(s); ok {
+		sv, ok := parseSemver(base)
+		if !ok {
+			return build{}, false
+		}
+		return build{sem: sv, commits: n}, true
+	}
+	sv, ok := parseSemver(s)
+	if !ok {
+		return build{}, false
+	}
+	return build{sem: sv}, true
+}
+
+func isHexSHA(s string) bool {
+	if len(s) < 7 || len(s) > 40 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// splitDescribe matches git describe: v0.1.0-rc.3-2-gaf09a24.
+func splitDescribe(s string) (base string, commits int, ok bool) {
+	rest, hash, found := strings.Cut(s, "-g")
+	if !found || !isHexSHA(hash) || strings.Contains(hash, "-") {
+		return "", 0, false
+	}
+	i := strings.LastIndex(rest, "-")
+	if i <= 0 {
+		return "", 0, false
+	}
+	n, err := strconv.Atoi(rest[i+1:])
+	if err != nil || n < 0 {
+		return "", 0, false
+	}
+	base = rest[:i]
+	if _, ok := parseSemver(base); !ok {
+		return "", 0, false
+	}
+	return base, n, true
+}
+
+func buildLess(a, b build) bool {
+	if semverLess(a.sem, b.sem) {
+		return true
+	}
+	if semverLess(b.sem, a.sem) {
+		return false
+	}
+	return a.commits < b.commits
 }
 
 type semver struct {
@@ -388,22 +484,23 @@ func semverLess(a, b semver) bool {
 		n = len(b.pre)
 	}
 	for i := 0; i < n; i++ {
-		ai, aNum := strconv.Atoi(a.pre[i])
-		bi, bNum := strconv.Atoi(b.pre[i])
-		if aNum == nil && bNum == nil {
-			if ai != bi {
-				return ai < bi
+		aNum, aErr := strconv.Atoi(a.pre[i])
+		bNum, bErr := strconv.Atoi(b.pre[i])
+		aIsNum := aErr == nil
+		bIsNum := bErr == nil
+		switch {
+		case aIsNum && bIsNum:
+			if aNum != bNum {
+				return aNum < bNum
 			}
-			continue
-		}
-		if aNum == nil && bNum != nil {
+		case aIsNum && !bIsNum:
+			return true // numeric identifiers sort before non-numeric
+		case !aIsNum && bIsNum:
 			return false
-		}
-		if aNum != nil && bNum == nil {
-			return true
-		}
-		if a.pre[i] != b.pre[i] {
-			return a.pre[i] < b.pre[i]
+		default:
+			if a.pre[i] != b.pre[i] {
+				return a.pre[i] < b.pre[i]
+			}
 		}
 	}
 	return len(a.pre) < len(b.pre)

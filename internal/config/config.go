@@ -96,8 +96,20 @@ type Agent struct {
 	RegistrationKey string
 	// AgentToken is set when this agent was installed with a one-time code.
 	// The relay stores only a hash of it, bound to Name.
-	AgentToken   string
-	Name         string
+	AgentToken string
+	// TokenFromFile is true when the config file holds an agent token.
+	// RELAY_ADDR and REGISTRATION_KEY from the environment do not override
+	// that install. An explicit --registration-key flag still can.
+	TokenFromFile bool
+	// KeyFromFlag is set by the command when --registration-key was passed.
+	KeyFromFlag bool
+	// NameFromEnv is true when AGENT_NAME was set, so install --code must
+	// match a name bound to the code instead of adopting it.
+	NameFromEnv bool
+	Name        string
+	// ControlUser is the person who should be able to run kite-agent pair
+	// without a further sudo. Install writes it as KITE_CONTROL_USER.
+	ControlUser  string
 	LocalSSHAddr string
 	// LocalSSHAuto is true when kite chose LocalSSHAddr by inspecting sshd.
 	// An explicit --local, LOCAL_SSH_ADDR without LOCAL_SSH_ADDR_AUTO, or a
@@ -122,7 +134,7 @@ type Client struct {
 
 // LoadRelay resolves relay settings. explicitPath, when non-empty, must exist.
 func LoadRelay(explicitPath string) (Relay, error) {
-	file, err := loadFile(explicitPath)
+	file, err := loadFile(explicitPath, true)
 	if err != nil {
 		return Relay{}, err
 	}
@@ -182,7 +194,18 @@ func LoadRelay(explicitPath string) (Relay, error) {
 
 // LoadAgent resolves agent settings.
 func LoadAgent(explicitPath string) (Agent, error) {
-	file, err := loadFile(explicitPath)
+	return loadAgent(explicitPath, true)
+}
+
+// LoadAgentIsolated resolves agent settings without discovering another
+// instance's config. A new --service-name install uses this so it does not
+// inherit the default machine's name and SSH address.
+func LoadAgentIsolated(explicitPath string) (Agent, error) {
+	return loadAgent(explicitPath, false)
+}
+
+func loadAgent(explicitPath string, discover bool) (Agent, error) {
+	file, err := loadFile(explicitPath, discover)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -192,6 +215,7 @@ func LoadAgent(explicitPath string) (Agent, error) {
 		RelayAddr:       file.Agent.RelayAddr,
 		RegistrationKey: file.Agent.RegistrationKey,
 		AgentToken:      file.Agent.AgentToken,
+		TokenFromFile:   strings.TrimSpace(file.Agent.AgentToken) != "",
 		Name:            file.Agent.Name,
 		SSHUser:         file.Agent.SSHUser,
 	}
@@ -208,16 +232,17 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	} else if d > 0 {
 		cfg.IdleTimeout = d
 	}
-	if v := os.Getenv("RELAY_ADDR"); v != "" {
+	if v := os.Getenv("RELAY_ADDR"); v != "" && !cfg.TokenFromFile {
 		cfg.RelayAddr = v
 	}
-	if v := os.Getenv("REGISTRATION_KEY"); v != "" {
+	if v := os.Getenv("REGISTRATION_KEY"); v != "" && !cfg.TokenFromFile {
 		cfg.RegistrationKey = v
 	}
 	if v := os.Getenv("AGENT_TOKEN"); v != "" {
 		cfg.AgentToken = v
 	}
 	if v := os.Getenv("AGENT_NAME"); v != "" {
+		cfg.NameFromEnv = true
 		cfg.Name = v
 	}
 	if v := os.Getenv("LOCAL_SSH_ADDR"); v != "" {
@@ -247,7 +272,7 @@ func LoadAgent(explicitPath string) (Agent, error) {
 
 // LoadClient resolves client settings.
 func LoadClient(explicitPath string) (Client, error) {
-	file, err := loadFile(explicitPath)
+	file, err := loadFile(explicitPath, true)
 	if err != nil {
 		return Client{}, err
 	}
@@ -600,12 +625,17 @@ func defaultStateDir() string {
 }
 
 // Credential is the secret this agent presents to the relay.
-// A real registration key wins over an agent token so an explicit
-// REGISTRATION_KEY still selects the legacy handshake. An install that
-// used a one-time code stores only the token.
+// A token stored in the config file wins over REGISTRATION_KEY and
+// RELAY_ADDR from the environment. --registration-key still overrides.
+// An install that used a one-time code stores only the token.
 func (a Agent) Credential() (secret, kind string, err error) {
 	key := strings.TrimSpace(a.RegistrationKey)
 	token := strings.TrimSpace(a.AgentToken)
+	// A token stored in the config wins over a registration key that arrived
+	// from the environment. --registration-key still overrides.
+	if token != "" && a.TokenFromFile && !a.KeyFromFlag {
+		return token, "agent", nil
+	}
 	if key != "" && key != PlaceholderKey {
 		return key, "registration", nil
 	}
@@ -702,17 +732,20 @@ func PeekConfigFlag(args []string) string {
 	return ""
 }
 
-func loadFile(explicit string) (File, error) {
+func loadFile(explicit string, discover bool) (File, error) {
 	path := explicit
 	if path == "" {
 		path = os.Getenv("KITE_CONFIG")
 	}
 	mustExist := path != ""
-	if path == "" {
+	if path == "" && discover {
 		path = discoverConfig()
 		if path == "" {
 			return File{}, nil
 		}
+	}
+	if path == "" {
+		return File{}, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {

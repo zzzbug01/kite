@@ -59,6 +59,10 @@ type Options struct {
 	// Code is a one-time install code from kite-relay invite. It is redeemed
 	// by the install command, not while flags are parsed.
 	Code string
+	// NameExplicit is true when AGENT_NAME or --name was set. An install
+	// code bound to a different name is rejected. Otherwise the agent adopts
+	// the name on the code.
+	NameExplicit bool
 }
 
 // UpgradeOptions selects the binary swap for one service instance.
@@ -69,6 +73,9 @@ type UpgradeOptions struct {
 	Apply       bool
 	Version     string
 	Check       bool
+	// Force allows downgrading a token-only agent to a release that does
+	// not understand agent tokens.
+	Force bool
 }
 
 // StatusInfo is a service query result. Zero means not installed.
@@ -189,7 +196,8 @@ Run "kite-agent run -h" or "kite-agent install -h" for flags.
 // ParseOptions loads agent settings from the config file, the environment,
 // and flags. The key and agent name are validated unless --version was set.
 func ParseOptions(args []string, install bool) (Options, error) {
-	cfg, err := config.LoadAgent(config.PeekConfigFlag(args))
+	explicit := config.PeekConfigFlag(args)
+	cfg, err := loadAgentForArgs(args, explicit)
 	if err != nil {
 		return Options{}, err
 	}
@@ -264,9 +272,18 @@ func ParseOptions(args []string, install bool) (Options, error) {
 	if fs.NArg() != 0 {
 		return Options{}, errors.New("unexpected arguments")
 	}
+	nameExplicit := cfg.NameFromEnv
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "registration-key" {
 			cfg.RegistrationKey = keyFlag
+			cfg.KeyFromFlag = true
+			cfg.TokenFromFile = false
+		}
+		if f.Name == "name" {
+			nameExplicit = true
+		}
+		if f.Name == "relay" && cfg.TokenFromFile {
+			// An explicit --relay still overrides a saved token install.
 		}
 		if f.Name == "local" {
 			cfg.LocalExplicit = true
@@ -312,7 +329,48 @@ func ParseOptions(args []string, install bool) (Options, error) {
 			canon = n
 		}
 	}
-	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir, ServiceName: canon, SkipSSHSetup: skipSSH, Code: code}, nil
+	return Options{Config: cfg, ConfigPath: configPath, InstallDir: installDir, ServiceName: canon, SkipSSHSetup: skipSSH, Code: code, NameExplicit: nameExplicit}, nil
+}
+
+// loadAgentForArgs skips the default machine config when a new
+// --service-name is being installed without --config.
+func loadAgentForArgs(args []string, explicit string) (config.Agent, error) {
+	peeked := peekFlag(args, "service-name")
+	if peeked != "" && !strings.EqualFold(peeked, ServiceName) && strings.TrimSpace(explicit) == "" && os.Getenv("KITE_CONFIG") == "" {
+		if canon, err := CanonicalServiceName(peeked); err == nil && canon != ServiceName && runtime.GOOS == "windows" {
+			if lay, err := DefaultLayout(canon); err == nil {
+				if st, err := os.Stat(lay.ConfigPath); err == nil && !st.IsDir() {
+					return config.LoadAgent(lay.ConfigPath)
+				}
+			}
+		}
+		return config.LoadAgentIsolated("")
+	}
+	return config.LoadAgent(explicit)
+}
+
+func peekFlag(args []string, name string) string {
+	long := "--" + name
+	short := "-" + name
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			break
+		}
+		if a == long || a == short {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if v, ok := strings.CutPrefix(a, long+"="); ok {
+			return v
+		}
+		if v, ok := strings.CutPrefix(a, short+"="); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // InstanceFromConfig reports the instance whose install path this is.
@@ -429,8 +487,12 @@ func writeControlAction(b *strings.Builder, command, goos string) {
 		default:
 			b.WriteString("  sudo launchctl bootout system/com.kite.agent\n")
 			b.WriteString("  sudo rm /Library/LaunchDaemons/com.kite.agent.plist\n")
+			b.WriteString("sudo kite-agent uninstall does this and leaves the env file in place.\n")
 		}
-		fmt.Fprintf(b, "kite-agent %s controls the service when run on Windows.\n\n", command)
+		if command != "uninstall" {
+			fmt.Fprintf(b, "kite-agent %s controls the service when run on Windows.\n", command)
+		}
+		b.WriteString("\n")
 	default:
 		fmt.Fprintf(b, "%s this instance with systemctl. The default unit is kite-agent.\n", command)
 		switch command {
@@ -440,11 +502,13 @@ func writeControlAction(b *strings.Builder, command, goos string) {
 			b.WriteString("A named instance uses /etc/systemd/system/<name>.service,\n")
 			b.WriteString("/usr/local/lib/kite/<name>/kite-agent, /etc/kite/<name>/agent.env,\n")
 			b.WriteString("and /var/lib/kite-agent/<name>.\n")
+			b.WriteString("sudo kite-agent uninstall does this and leaves the env file in place.\n")
 		default:
 			fmt.Fprintf(b, "  sudo systemctl %s kite-agent\n", command)
 			fmt.Fprintf(b, "  sudo systemctl %s <service-name>\n", command)
+			fmt.Fprintf(b, "kite-agent %s controls the service when run on Windows.\n", command)
 		}
-		fmt.Fprintf(b, "kite-agent %s controls the service when run on Windows.\n\n", command)
+		b.WriteString("\n")
 	}
 }
 
@@ -625,6 +689,7 @@ func ParseUpgrade(args []string) (UpgradeOptions, error) {
 	var serviceName, from, version string
 	apply := fs.Bool("apply", false, "internal: perform the swap in this process (the scheduled task runs this)")
 	check := fs.Bool("check", false, "print the available version and do not replace the binary")
+	force := fs.Bool("force", false, "allow downgrading a token-only agent to a release that has no agent tokens")
 	fs.StringVar(&serviceName, "service-name", "", "instance to upgrade (default kite-agent)")
 	fs.StringVar(&from, "from", "", "path to the new kite-agent binary (offline; omit to download a release)")
 	fs.StringVar(&version, "version", "", "release tag to install, for example v0.1.0 (default: newest release)")
@@ -653,7 +718,7 @@ func ParseUpgrade(args []string) (UpgradeOptions, error) {
 	if *check && from != "" {
 		return UpgradeOptions{}, errors.New("--check does not take --from")
 	}
-	return UpgradeOptions{ServiceName: canon, From: from, Apply: *apply, Version: version, Check: *check}, nil
+	return UpgradeOptions{ServiceName: canon, From: from, Apply: *apply, Version: version, Check: *check, Force: *force}, nil
 }
 
 // CanonicalServiceName accepts the default name and a short instance name.

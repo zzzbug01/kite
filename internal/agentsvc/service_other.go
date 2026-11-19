@@ -27,9 +27,37 @@ func Serve(string, func(context.Context) error) error {
 
 // Install is provided by install_host.go on this platform.
 
-// Uninstall removes the Windows service.
-func Uninstall(string) error {
-	return errWindowsOnly("uninstall")
+// Uninstall disables the systemd unit or LaunchDaemon and leaves the env file.
+func Uninstall(name string) error {
+	canon, err := CanonicalServiceName(name)
+	if err != nil {
+		return err
+	}
+	lay := unixLayout(canon)
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("kite-agent uninstall needs root. On Linux: sudo systemctl disable --now %s. On macOS: sudo launchctl bootout system/%s", lay.unitName, lay.label)
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		_ = exec.Command("launchctl", "bootout", "system/"+lay.label).Run()
+		if err := os.Remove(lay.plist); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "Removed launchd daemon %s.\n", lay.label)
+	default:
+		if out, err := exec.Command("systemctl", "disable", "--now", lay.unitName).CombinedOutput(); err != nil {
+			if !strings.Contains(string(out), "does not exist") && !strings.Contains(string(out), "not loaded") {
+				return fmt.Errorf("systemctl disable --now %s: %w (%s)", lay.unitName, err, bytesTrim(out))
+			}
+		}
+		if err := os.Remove(lay.unitPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = exec.Command("systemctl", "daemon-reload").Run()
+		fmt.Fprintf(os.Stdout, "Removed systemd unit %s.\n", lay.unitName)
+	}
+	fmt.Fprintf(os.Stdout, "The config was left on disk. Delete it to remove the agent token or registration key:\n  %s\n", lay.env)
+	return nil
 }
 
 // Start starts the Windows service.
@@ -55,6 +83,15 @@ func Status(string) (string, error) {
 // List enumerates Windows kite-agent services. It is not available here.
 func List() (string, error) {
 	return "", fmt.Errorf("kite-agent list is not supported on %s; it lists Windows services named kite-agent and kite-agent-*", runtime.GOOS)
+}
+
+// RequireUpgradePriv is the root check for a download-and-replace upgrade.
+// It runs before anything is written under /tmp.
+func RequireUpgradePriv() error {
+	if os.Geteuid() == 0 {
+		return nil
+	}
+	return errors.New("kite-agent upgrade needs root to replace the service binary and restart it. Re-run: sudo kite-agent upgrade")
 }
 
 // Upgrade replaces this instance's binary and restarts the supervisor.

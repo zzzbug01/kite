@@ -110,6 +110,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("POST /pair", s.handlePairCreate)
 	mux.HandleFunc("POST /pair/redeem", s.handlePairRedeem)
 	mux.HandleFunc("POST /invite/redeem", s.handleInviteRedeem)
+	mux.HandleFunc("POST /invite/revoke", s.handleInviteRevoke)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -145,6 +146,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, certFile, keyFile s
 		return fmt.Errorf("STATE_DIR %s: %w", s.tokens.Dir(), err)
 	}
 	ctx, cancel := context.WithCancel(ctx)
+	go s.watchAgentTokens(ctx)
 	s.rootCtx = ctx
 	s.rootCancel = cancel
 	defer cancel()
@@ -205,6 +207,10 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a := newAgentConn(s, hello.Name, ws, ctx, cancel)
+	if hello.Auth == "agent" {
+		a.tokenAuth = true
+		a.tokenHash = hello.KeyHash
+	}
 	for _, feature := range hello.Features {
 		a.features[feature] = true
 	}
@@ -364,8 +370,11 @@ func (s *Server) readHello(ctx context.Context, ws *websocket.Conn, _ string) (p
 		s.reject(ctx, ws, reason)
 		return protocol.Hello{}, false
 	}
+	if h.Auth == "agent" {
+		h.KeyHash = invite.HashAgentToken(h.Key)
+	}
 	// Drop the secret before the value escapes this function's success path
-	// into logs. Callers only need role, name, and features.
+	// into logs. Callers only need role, name, features, and the token hash.
 	h.Key = ""
 	return h, true
 }
@@ -417,6 +426,38 @@ func (s *Server) registrationOK(got string) bool {
 	ok := auth.Equal(got, s.key) && s.key != ""
 	prevOK := auth.Equal(got, s.prev) && s.prev != ""
 	return ok || prevOK
+}
+
+func (s *Server) watchAgentTokens(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.dropRevokedAgents()
+		}
+	}
+}
+
+// dropRevokedAgents closes sessions whose agent token was revoked or replaced.
+func (s *Server) dropRevokedAgents() {
+	s.mu.Lock()
+	list := make([]*agentConn, 0)
+	for _, a := range s.agents {
+		if a != nil && a.tokenAuth {
+			list = append(list, a)
+		}
+	}
+	s.mu.Unlock()
+	for _, a := range list {
+		hash, ok := s.invites.TokenHash(a.name)
+		if !ok || hash != a.tokenHash {
+			s.log.Info("agent token revoked", "name", a.name)
+			a.close()
+		}
+	}
 }
 
 func (s *Server) reject(ctx context.Context, ws *websocket.Conn, reason string) {
@@ -503,9 +544,11 @@ type agentConn struct {
 	nextID  uint32
 	closed  bool
 
-	features map[string]bool
-	pairMu   sync.Mutex
-	pairWait map[string]chan protocol.PairResult
+	features  map[string]bool
+	tokenAuth bool
+	tokenHash string
+	pairMu    sync.Mutex
+	pairWait  map[string]chan protocol.PairResult
 
 	lastRecv atomic.Int64
 }
@@ -528,7 +571,9 @@ func (a *agentConn) close() {
 	a.once.Do(func() {
 		a.cancel()
 		close(a.done)
-		a.ws.CloseNow()
+		if a.ws != nil {
+			a.ws.CloseNow()
+		}
 		a.mu.Lock()
 		a.closed = true
 		streams := a.streams

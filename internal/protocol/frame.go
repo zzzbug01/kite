@@ -163,6 +163,9 @@ type Hello struct {
 	Agent    string   `json:"agent,omitempty"`
 	Auth     string   `json:"auth,omitempty"`
 	Features []string `json:"features,omitempty"`
+	// KeyHash is set by the relay after it checks an agent token. It is not
+	// part of the wire format.
+	KeyHash string `json:"-"`
 }
 
 // PairInstall is the JSON payload of TypePairInstall.

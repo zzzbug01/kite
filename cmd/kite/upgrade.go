@@ -41,6 +41,18 @@ func runUpgrade(args []string) error {
 	if ver == "" {
 		ver = strings.TrimSpace(os.Getenv("KITE_VERSION"))
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	if !*check {
+		if err := canWrite(exe); err != nil {
+			return fmt.Errorf("%w\nre-run with permission to replace %s", err, exe)
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	got, err := release.Prepare(ctx, "kite", ver, version.Version, *check)
@@ -51,13 +63,6 @@ func runUpgrade(args []string) error {
 	if len(got.Binary) == 0 {
 		return nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = resolved
-	}
 	if err := release.InstallFile(exe, got.Binary); err != nil {
 		return fmt.Errorf("%w\nre-run with permission to replace %s", err, exe)
 	}
@@ -67,4 +72,15 @@ func runUpgrade(args []string) error {
 		fmt.Fprintf(os.Stdout, "Replaced %s\n", exe)
 	}
 	return nil
+}
+
+func canWrite(exe string) error {
+	dir := filepath.Dir(exe)
+	f, err := os.CreateTemp(dir, ".kite-write-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	f.Close()
+	return os.Remove(name)
 }

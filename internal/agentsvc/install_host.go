@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/zzzbug01/kite/internal/agentctl"
 )
@@ -53,12 +54,25 @@ func unixLayout(name string) unixPaths {
 	}
 }
 
+// Preflight reports whether install can register the service. It does not
+// redeem an install code and does not change the machine.
+func Preflight(opt Options) error {
+	if os.Geteuid() == 0 {
+		return nil
+	}
+	hint := "sudo kite-agent install"
+	if strings.TrimSpace(opt.Code) != "" {
+		hint = "sudo kite-agent install --relay " + opt.Config.RelayAddr + " --code " + opt.Code
+	}
+	return errors.New("kite-agent install needs root to register the service; re-run: " + hint)
+}
+
 // Install on Linux and macOS runs after SSH setup. Root writes the supervisor
 // files and starts the agent. Anyone else gets the exact manual commands.
 func Install(opt Options) error {
-	if os.Geteuid() != 0 {
+	if err := Preflight(opt); err != nil {
 		fmt.Fprint(os.Stdout, ManualInstallText(runtime.GOOS))
-		return errors.New("kite-agent install needs root to register the service; re-run with sudo, or follow the manual steps above")
+		return err
 	}
 	if err := rejectPlaceholderRelay(opt.Config.RelayAddr); err != nil {
 		return err

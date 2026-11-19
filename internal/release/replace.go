@@ -25,11 +25,11 @@ func installFile(dest string, data []byte, windows bool) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, ".kite-new.tmp")
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	f, err := os.CreateTemp(dir, ".kite-new-*")
 	if err != nil {
 		return err
 	}
+	tmp := f.Name()
 	_, werr := f.Write(data)
 	cerr := f.Close()
 	if werr != nil || cerr != nil {

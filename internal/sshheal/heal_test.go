@@ -60,6 +60,24 @@ func TestRecoverStartsAndThrottles(t *testing.T) {
 	}
 }
 
+func TestRecoverDetectsMovedPortBeforeStart(t *testing.T) {
+	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	sys := &fakeSys{running: false, detected: "127.0.0.1:2222", startErr: errors.New("not root; cannot start sshd")}
+	h := New(sys, "127.0.0.1:22", true, filepath.Join(t.TempDir(), "h.json"), "", nil, func() time.Time { return now })
+	if !h.Recover(context.Background(), errors.New("refused")) {
+		t.Fatal("expected retry on the new port")
+	}
+	if sys.started != 0 {
+		t.Fatal("start ran before the port was re-detected")
+	}
+	if h.Addr() != "127.0.0.1:2222" {
+		t.Fatal(h.Addr())
+	}
+	if got := Read(h.healthPath).Line(); got != "Local SSH: port changed from 127.0.0.1:22 to 127.0.0.1:2222" {
+		t.Fatal(got)
+	}
+}
+
 func TestRecoverChangesAutoPort(t *testing.T) {
 	now := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 	sys := &fakeSys{running: true, detected: "127.0.0.1:2222"}

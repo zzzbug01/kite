@@ -2,6 +2,7 @@ package release
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -28,6 +29,13 @@ func Prepare(ctx context.Context, command, version, current string, check bool) 
 		return Prepared{}, err
 	}
 	pinned := strings.TrimSpace(version) != ""
+	if !pinned && !KnownBuild(current) {
+		msg := fmt.Sprintf("%s %s is not a release build; pass --version to choose a release", command, display(current))
+		if check {
+			return Prepared{Tag: rel.Tag, Message: msg}, nil
+		}
+		return Prepared{}, errors.New(msg)
+	}
 	if SameVersion(current, rel.Tag) || (!pinned && !Older(current, rel.Tag)) {
 		msg := fmt.Sprintf("%s %s is already the latest release", command, display(current))
 		if pinned && SameVersion(current, rel.Tag) {

@@ -311,9 +311,9 @@ func pairHelp(err error) string {
 	msg := `kite-agent pair could not reach the running agent.
 Start kite-agent and retry. On Windows the installing user can pair without
 a further elevation prompt while the service is running. On Linux and macOS,
-sudo kite-agent pair when the agent runs as root.
-If REGISTRATION_KEY is in the environment or the config file, pair asks the
-relay directly, which still requires the agent to be connected.`
+run: sudo kite-agent pair
+when the control file is not readable. An agent installed with --code pairs
+with its saved agent token; it does not need REGISTRATION_KEY.`
 	if err != nil {
 		return msg + "\nLast error: " + err.Error()
 	}

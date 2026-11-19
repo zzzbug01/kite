@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/zzzbug01/kite/internal/config"
@@ -20,6 +21,7 @@ func runInvite(args []string) error {
 	fs.SetOutput(os.Stderr)
 	ttl := fs.Duration("ttl", invite.DefaultTTL, "how long the install code stays valid (maximum 24h)")
 	name := fs.String("name", "", "optional agent name allowed to redeem this code")
+	public := fs.String("public-host", publicHost(), "host operators pass to --relay (env KITE_PUBLIC_URL). The example uses tunnel.example.com when this is unset")
 	dir := fs.String("state-dir", cfg.StateDir, "directory for install.json (env STATE_DIR)")
 	fs.String("config", "", "YAML config file")
 	fs.Usage = func() {
@@ -54,9 +56,32 @@ func runInvite(args []string) error {
 	}
 	fmt.Fprintln(os.Stdout)
 	fmt.Fprintln(os.Stdout, "On the computer to control:")
-	fmt.Fprintf(os.Stdout, "  curl -fsSL https://raw.githubusercontent.com/zzzbug01/kite/main/install.sh | sh -s -- --agent --relay tunnel.example.com --code %s\n", code)
+	host := strings.TrimSpace(*public)
+	if host == "" {
+		host = "tunnel.example.com"
+	}
+	fmt.Fprintf(os.Stdout, "  curl -fsSL https://raw.githubusercontent.com/zzzbug01/kite/main/install.sh | sh -s -- --agent --relay %s --code %s\n", host, code)
 	fmt.Fprintln(os.Stdout)
 	fmt.Fprintln(os.Stdout, "Windows, from PowerShell (the script relaunches elevated):")
-	fmt.Fprintf(os.Stdout, "  $env:KITE_AGENT='1'; $env:KITE_RELAY='tunnel.example.com'; $env:KITE_CODE='%s'; irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex\n", code)
+	fmt.Fprintf(os.Stdout, "  $env:KITE_AGENT='1'; $env:KITE_RELAY='%s'; $env:KITE_CODE='%s'; irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex\n", host, code)
 	return nil
+}
+
+func publicHost() string {
+	for _, key := range []string{"KITE_PUBLIC_URL", "PUBLIC_URL"} {
+		v := strings.TrimSpace(os.Getenv(key))
+		if v == "" {
+			continue
+		}
+		v = strings.TrimPrefix(v, "https://")
+		v = strings.TrimPrefix(v, "http://")
+		v = strings.TrimPrefix(v, "wss://")
+		v = strings.TrimPrefix(v, "ws://")
+		v = strings.Trim(v, "/")
+		if i := strings.IndexByte(v, '/'); i >= 0 {
+			v = v[:i]
+		}
+		return v
+	}
+	return ""
 }

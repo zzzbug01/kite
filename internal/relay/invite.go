@@ -18,8 +18,9 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Code string `json:"code"`
-		Name string `json:"name"`
+		Code         string `json:"code"`
+		Name         string `json:"name"`
+		ExplicitName bool   `json:"explicit_name"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "bad request")
@@ -29,7 +30,7 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "agent name is invalid")
 		return
 	}
-	token, agent, err := s.invites.Redeem(req.Code, req.Name, time.Now())
+	token, agent, err := s.invites.Redeem(req.Code, req.Name, req.ExplicitName, time.Now())
 	if err != nil {
 		s.log.Info("invite redeem rejected", "remote", ip, "result", err.Error())
 		writeAPIError(w, inviteStatus(err), err.Error())
@@ -37,6 +38,32 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("invite redeem", "agent", agent, "remote", ip)
 	writeJSON(w, http.StatusOK, map[string]string{"agent": agent, "token": token})
+}
+
+func (s *Server) handleInviteRevoke(w http.ResponseWriter, r *http.Request) {
+	ip := s.clientIP(r)
+	if !s.inviteLim.AllowAll(time.Now(), pairing.Rule{Key: "invite-revoke:ip:" + ip, Limit: 30, Window: 10 * time.Minute}) {
+		writeAPIError(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+		Name  string `json:"name"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if !s.invites.Authenticate(req.Token, req.Name) {
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if _, err := s.invites.Revoke(req.Name); err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.dropRevokedAgents()
+	writeJSON(w, http.StatusOK, map[string]string{"agent": req.Name, "revoked": "true"})
 }
 
 func inviteStatus(err error) int {

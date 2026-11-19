@@ -89,7 +89,7 @@ Controlled machine. On the relay, as root or the user that owns `STATE_DIR`:
 sudo kite-relay invite
 ```
 
-That prints one install code. The default lifetime is 1 hour and the maximum is 24 hours (`--ttl 30m`). `--name my-pc` limits the code to that agent. Only a hash is written to `STATE_DIR/install.json`. `kite-relay invite` and the running relay take the same directory lock, so the code works while the relay is up and is still there after a restart.
+That prints one install code. The default lifetime is 1 hour and the maximum is 24 hours (`--ttl 30m`). `--name my-pc` binds the code to that agent. The installer adopts that name unless `AGENT_NAME` or `--name` is set, and an explicit name that does not match is rejected. Example commands use `KITE_PUBLIC_URL` or `--public-host` when the relay has a public host, and `tunnel.example.com` otherwise. Only a hash is written to `STATE_DIR/install.json`. `kite-relay invite` and the running relay take the same directory lock, so the code works while the relay is up and is still there after a restart. `kite-relay agents revoke` also disconnects an agent that is already connected with that token.
 
 On the computer you want to reach:
 
@@ -105,7 +105,9 @@ $env:KITE_AGENT='1'; $env:KITE_RELAY='tunnel.example.com'; $env:KITE_CODE='ABCD-
 kite-agent pair
 ```
 
-`kite-agent install --relay HOST --code ABCD-EFGH` is enough. The agent name defaults to the hostname, lowercased and trimmed to the allowed name characters. `connect` is reserved. The SSH user defaults to the person running install: `SUDO_USER` under sudo, and on Windows the logged-in user rather than a computer account such as `HOST$`. Flags and environment variables still override those defaults. Redeeming the code returns an agent token. The agent stores that token instead of `REGISTRATION_KEY`, and `kite-agent pair` then authenticates with the token. The code is consumed only after the token is stored. An expired code is rejected with `install code expired`.
+`kite-agent install --relay HOST --code ABCD-EFGH` is enough. The agent name defaults to the short hostname (the part before the first dot), lowercased and trimmed to the allowed name characters. `connect` is reserved. The SSH user defaults to the person running install: `SUDO_USER` under sudo, and on Windows the logged-in user rather than a computer account such as `HOST$`. Flags and environment variables still override those defaults. Redeeming the code returns an agent token. The agent stores that token instead of `REGISTRATION_KEY`, and `kite-agent pair` then authenticates with the token. Local checks (root, a writable install path, SSH setup) run before the code is redeemed. The code is consumed only after the token is stored. An expired code is rejected with `install code expired`.
+
+`kite-agent uninstall` removes the systemd unit on Linux or the LaunchDaemon on macOS, and the Windows service. It leaves the env file or config, which may hold the agent token. `--service-name` selects one instance. `kite-agent upgrade` refuses to replace a token-only install with a release older than the token handshake unless `--force` is set.
 
 `kite-relay agents list` and `kite-relay agents revoke <name>` manage those agent tokens. They do not remove SSH keys or client tokens.
 
@@ -364,7 +366,7 @@ git push origin v0.1.0-rc.2
 | `SSH_USER` | agent | invoking user (`SUDO_USER` under sudo). Optional |
 | `TRUSTED_PROXIES` | relay | empty: trust X-Forwarded-For only from loopback, using the right-most address |
 
-Flags: `--listen`, `--registration-key`, `--registration-key-previous`, `--state-dir`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--ssh-user`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite. A bare host or `https://` URL is accepted and normalized to `wss://`. `kite-agent install` also accepts `--install-dir`, `--skip-ssh-setup`, and `--code`. `kite connect` accepts `--relay` and `--label`. `kite-agent pair` accepts `--ttl` (default 10m, maximum 30m). `kite-relay invite` accepts `--ttl` (default 1h, maximum 24h) and `--name`. `kite upgrade` and `kite-agent upgrade` accept `--version` and `--check`.
+Flags: `--listen`, `--registration-key`, `--registration-key-previous`, `--state-dir`, `--tls-cert`, `--tls-key`, `--idle-timeout`, `--relay`, `--name`, `--local`, `--ssh-user`, `--config`. A URL with no path becomes `/agent` for kite-agent and `/client` for kite. A bare host or `https://` URL is accepted and normalized to `wss://`. `kite-agent install` also accepts `--install-dir`, `--skip-ssh-setup`, `--code`, and `--service-name`. `kite connect` accepts `--relay` and `--label`. `kite-agent pair` accepts `--ttl` (default 10m, maximum 30m). `kite-relay invite` accepts `--ttl` (default 1h, maximum 24h), `--name`, and `--public-host` (`KITE_PUBLIC_URL`). `kite upgrade` and `kite-agent upgrade` accept `--version`, `--check`, and `--force`.
 
 On Windows, when no `--config` / `KITE_CONFIG` is set and the user config files are absent, kite-agent also reads `%ProgramData%\kite\config.yaml`. The installed service always passes `--config` so it does not depend on that search.
 
@@ -461,7 +463,7 @@ kite connect --relay tunnel.example.com ABCD-EFGH
 sudo kite-relay invite
 ```
 
-它打印一个安装码。默认有效期 1 小时，最长 24 小时（`--ttl 30m`）。`--name my-pc` 把这个码限定给那个 agent。磁盘上只保存哈希，文件是 `STATE_DIR/install.json`。`kite-relay invite` 和正在运行的中继使用同一把目录锁，所以中继在跑的时候就能兑换，重启之后码也还在。
+它打印一个安装码。默认有效期 1 小时，最长 24 小时（`--ttl 30m`）。`--name my-pc` 把这个码绑定给那个 agent。安装程序默认采用码上的名字；只有设置了 `AGENT_NAME` 或 `--name` 时才必须一致，不一致会被拒绝。示例命令在中继配置了 `KITE_PUBLIC_URL` 或 `--public-host` 时使用那个主机名，否则仍是 `tunnel.example.com`。磁盘上只保存哈希，文件是 `STATE_DIR/install.json`。`kite-relay invite` 和正在运行的中继使用同一把目录锁，所以中继在跑的时候就能兑换，重启之后码也还在。`kite-relay agents revoke` 会断开已经用该令牌连上的 agent。
 
 在要被连接的电脑上：
 
@@ -477,7 +479,9 @@ $env:KITE_AGENT='1'; $env:KITE_RELAY='tunnel.example.com'; $env:KITE_CODE='ABCD-
 kite-agent pair
 ```
 
-`kite-agent install --relay 主机 --code ABCD-EFGH` 就够了。agent 名默认是主机名，转成小写并收成允许的字符。`connect` 是保留名。SSH 用户默认是执行安装的人：sudo 下用 `SUDO_USER`，Windows 上用当前登录的用户，不会用 `HOST$` 这种计算机账户。命令行参数和环境变量仍然优先。兑换成功后中继发回一个 agent 令牌。agent 把它存进配置，不再写 `REGISTRATION_KEY`，随后 `kite-agent pair` 用这个令牌认证。令牌成功写入之后安装码才作废。过期的码会被明确拒绝，提示 `install code expired`。
+`kite-agent install --relay 主机 --code ABCD-EFGH` 就够了。agent 名默认是短主机名（第一个点之前的部分），转成小写并收成允许的字符。`connect` 是保留名。SSH 用户默认是执行安装的人：sudo 下用 `SUDO_USER`，Windows 上用当前登录的用户，不会用 `HOST$` 这种计算机账户。命令行参数和环境变量仍然优先。兑换成功后中继发回一个 agent 令牌。agent 把它存进配置，不再写 `REGISTRATION_KEY`，随后 `kite-agent pair` 用这个令牌认证。root、可写路径和 SSH 设置这些本地检查都在兑换之前完成。令牌成功写入之后安装码才作废。过期的码会被明确拒绝，提示 `install code expired`。
+
+`kite-agent uninstall` 在 Linux 上删除 systemd 单元，在 macOS 上删除 LaunchDaemon，在 Windows 上删除服务。环境文件或配置会留下来，里面可能有 agent 令牌。`--service-name` 选择其中一个实例。`kite-agent upgrade` 在配置里只有 agent 令牌时，拒绝换到不认识该令牌的旧版本，除非加上 `--force`。
 
 `kite-relay agents list` 和 `kite-relay agents revoke <名字>` 管理这些 agent 令牌。它们不删除 SSH 公钥，也不删除客户端令牌。
 
@@ -736,6 +740,6 @@ git push origin v0.1.0-rc.2
 | `SSH_USER` | agent | 执行命令的用户（sudo 下是 `SUDO_USER`）。可选 |
 | `TRUSTED_PROXIES` | 中继 | 空：只信任来自回环地址的 X-Forwarded-For，并取最右边那一项 |
 
-对应参数：`--listen`、`--registration-key`、`--registration-key-previous`、`--state-dir`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--ssh-user`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。纯主机名和 `https://` 会整理成 `wss://`。`kite-agent install` 还可以用 `--install-dir`、`--skip-ssh-setup` 和 `--code`。`kite connect` 可以用 `--relay` 和 `--label`。`kite-agent pair` 可以用 `--ttl`（默认 10 分钟，最长 30 分钟）。`kite-relay invite` 可以用 `--ttl`（默认 1 小时，最长 24 小时）和 `--name`。`kite upgrade` 和 `kite-agent upgrade` 可以用 `--version` 和 `--check`。
+对应参数：`--listen`、`--registration-key`、`--registration-key-previous`、`--state-dir`、`--tls-cert`、`--tls-key`、`--idle-timeout`、`--relay`、`--name`、`--local`、`--ssh-user`、`--config`。URL 没有路径时，kite-agent 使用 `/agent`，kite 使用 `/client`。纯主机名和 `https://` 会整理成 `wss://`。`kite-agent install` 还可以用 `--install-dir`、`--skip-ssh-setup`、`--code` 和 `--service-name`。`kite connect` 可以用 `--relay` 和 `--label`。`kite-agent pair` 可以用 `--ttl`（默认 10 分钟，最长 30 分钟）。`kite-relay invite` 可以用 `--ttl`（默认 1 小时，最长 24 小时）、`--name` 和 `--public-host`（`KITE_PUBLIC_URL`）。`kite upgrade` 和 `kite-agent upgrade` 可以用 `--version`、`--check` 和 `--force`。
 
 在 Windows 上，如果没有 `--config` / `KITE_CONFIG`，也没有用户配置文件，kite-agent 还会读取 `%ProgramData%\kite\config.yaml`。装好的服务总会带上 `--config`，不依赖这个搜索顺序。

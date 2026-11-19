@@ -15,7 +15,7 @@ try {
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch {}
 
-if ($env:OS -ne 'Windows_NT') {
+if ($env:OS -ne 'Windows_NT' -and $env:KITE_INSTALL_LIB_ONLY -ne '1') {
   throw 'install.ps1 is for Windows'
 }
 
@@ -32,6 +32,7 @@ directory is %LOCALAPPDATA%\kite\bin. Both are added to the user PATH.
 $Version = [string]$env:KITE_VERSION
 $Relay = [string]$env:KITE_RELAY
 $Code = [string]$env:KITE_CODE
+$ServiceName = [string]$env:KITE_SERVICE_NAME
 $Agent = ($env:KITE_AGENT -eq '1' -or $env:KITE_AGENT -eq 'true')
 $RelayServer = ($env:KITE_RELAY_SERVER -eq '1')
 
@@ -55,6 +56,11 @@ while ($i -lt $args.Count) {
       $i++
       if ($i -ge $args.Count) { throw '--code needs a value' }
       $Code = [string]$args[$i]
+    }
+    '^(-ServiceName|--service-name)$' {
+      $i++
+      if ($i -ge $args.Count) { throw '--service-name needs a value' }
+      $ServiceName = [string]$args[$i]
     }
     '^(-h|--help|-Help)$' { Show-KiteInstallHelp; return }
     default { throw "unknown argument $a" }
@@ -81,34 +87,61 @@ function Test-KiteAdmin {
 
 if ($Agent -and -not (Test-KiteAdmin)) {
   Write-Host 'kite-agent install needs an elevated PowerShell. Approve the prompt to continue.'
-  $url = 'https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1'
-  if ($env:KITE_INSTALL_URL) { $url = $env:KITE_INSTALL_URL }
+  # Relaunch this same script, not a fresh download of main. iex has no path,
+  # so the script text is saved and executed as a file.
+  $body = $MyInvocation.MyCommand.Definition
+  if ([string]::IsNullOrWhiteSpace($body) -and $PSCommandPath) {
+    $body = [IO.File]::ReadAllText($PSCommandPath)
+  }
+  if ([string]::IsNullOrWhiteSpace($body)) {
+    throw 'could not capture this installer to relaunch it elevated'
+  }
   $tmp = Join-Path $env:TEMP ("kite-install-" + [guid]::NewGuid().ToString('n') + '.ps1')
-  $relayEsc = $Relay.Replace("'", "''")
-  $codeEsc = $Code.Replace("'", "''")
-  $verEsc = $Version.Replace("'", "''")
-  $urlEsc = $url.Replace("'", "''")
+  Set-Content -Path $tmp -Value $body -Encoding UTF8
+  $envFile = Join-Path $env:TEMP ("kite-install-" + [guid]::NewGuid().ToString('n') + '.env.ps1')
+  $svcEsc = $ServiceName.Replace("'", "''")
   @"
-`$ErrorActionPreference = 'Stop'
 `$env:KITE_AGENT = '1'
-`$env:KITE_RELAY = '$relayEsc'
-`$env:KITE_CODE = '$codeEsc'
-`$env:KITE_VERSION = '$verEsc'
-irm '$urlEsc' | iex
-"@ | Set-Content -Path $tmp -Encoding UTF8
+`$env:KITE_RELAY = '$($Relay.Replace("'","''"))'
+`$env:KITE_CODE = '$($Code.Replace("'","''"))'
+`$env:KITE_VERSION = '$($Version.Replace("'","''"))'
+`$env:KITE_SERVICE_NAME = '$svcEsc'
+"@ | Set-Content -Path $envFile -Encoding UTF8
+  $argLine = '-NoProfile -ExecutionPolicy Bypass -Command "& { . ''' + $envFile + '''; & ''' + $tmp + ''' }"'
   try {
-    $argLine = '-NoProfile -ExecutionPolicy Bypass -File "' + $tmp + '"'
     $p = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $argLine
   } catch {
-    Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+    Remove-Item -Force $tmp, $envFile -ErrorAction SilentlyContinue
     throw 'elevation is required to install the kite agent'
   }
-  Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+  Remove-Item -Force $tmp, $envFile -ErrorAction SilentlyContinue
   if (-not $p -or $p.ExitCode -ne 0) {
     throw 'elevated install failed'
   }
   return
 }
+
+# PowerShell 5.1 can hand back a JSON array as one object. @(that) stays one
+# element, and $r.draft is then the array of every draft flag, which is
+# truthy, so every release is skipped. Unwrap until each item is one release.
+function Expand-KiteList($raw) {
+  $items = New-Object System.Collections.Generic.List[object]
+  if ($null -eq $raw) { return ,@() }
+  $queue = New-Object System.Collections.Queue
+  $queue.Enqueue($raw)
+  while ($queue.Count -gt 0) {
+    $cur = $queue.Dequeue()
+    if ($null -eq $cur) { continue }
+    if ($cur.PSObject -and $null -ne $cur.PSObject.Properties['tag_name']) {
+      $items.Add($cur) | Out-Null
+      continue
+    }
+    foreach ($inner in $cur) { $queue.Enqueue($inner) }
+  }
+  return ,$items.ToArray()
+}
+
+if ($env:KITE_INSTALL_LIB_ONLY -eq '1') { return }
 
 $apiRoot = 'https://api.github.com'
 if ($env:KITE_GITHUB_API) { $apiRoot = $env:KITE_GITHUB_API.TrimEnd('/') }
@@ -122,7 +155,8 @@ function Invoke-KiteRest($Url) {
   }
   if ($env:HTTPS_PROXY) { $params.Proxy = $env:HTTPS_PROXY }
   elseif ($env:https_proxy) { $params.Proxy = $env:https_proxy }
-  return Invoke-RestMethod @params
+  # The comma keeps a JSON array as one value so Expand-KiteList can unwrap it.
+  return , (Invoke-RestMethod @params)
 }
 
 function Save-KiteFile($Url, $Dest) {
@@ -138,7 +172,7 @@ function Save-KiteFile($Url, $Dest) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-  $rels = @(Invoke-KiteRest ($apiRoot + '/repos/zzzbug01/kite/releases?per_page=30'))
+  $rels = Expand-KiteList (Invoke-KiteRest ($apiRoot + '/repos/zzzbug01/kite/releases?per_page=30'))
   $stable = $null
   $pre = $null
   foreach ($r in $rels) {
@@ -167,8 +201,12 @@ try {
   Write-Host "Downloading $archive"
   $zipPath = Join-Path $work $archive
   $sumPath = Join-Path $work 'SHA256SUMS'
-  Save-KiteFile "$base/$archive" $zipPath
-  Save-KiteFile "$base/SHA256SUMS" $sumPath
+  try {
+    Save-KiteFile "$base/$archive" $zipPath
+    Save-KiteFile "$base/SHA256SUMS" $sumPath
+  } catch {
+    throw "release $Version was not found"
+  }
   $want = $null
   foreach ($line in (Get-Content -Path $sumPath)) {
     if ($line -match '^([0-9A-Fa-f]{64})\s+\*?(\S+)\s*$' -and $Matches[2] -eq $archive) {
@@ -194,11 +232,59 @@ try {
   }
   New-Item -ItemType Directory -Force -Path $dest | Out-Null
   foreach ($name in @('kite.exe', 'kite-agent.exe')) {
-    $src = Join-Path $out $name
-    if (-not (Test-Path $src)) { throw "archive does not contain $name" }
-    Unblock-File -Path $src
-    Copy-Item -Force -Path $src -Destination (Join-Path $dest $name)
-    Unblock-File -Path (Join-Path $dest $name)
+    if (-not (Test-Path (Join-Path $out $name))) { throw "archive does not contain $name" }
+    Unblock-File -Path (Join-Path $out $name)
+  }
+  $svc = 'kite-agent'
+  if (-not [string]::IsNullOrWhiteSpace($ServiceName)) { $svc = $ServiceName }
+  $running = $false
+  try {
+    $info = Get-Service -Name $svc -ErrorAction Stop
+    if ($info.Status -eq 'Running') { $running = $true }
+  } catch {}
+  if ($running) {
+    # The service binary is locked. Stage both files outside the directory this
+    # script deletes, then upgrade --from stops, replaces both, and starts.
+    # The task removes the stage after the copy. A failure does not leave
+    # kite.exe new and kite-agent.exe old.
+    $stage = Join-Path $env:TEMP ("kite-upgrade-" + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $stage | Out-Null
+    Copy-Item -LiteralPath (Join-Path $out 'kite.exe') -Destination (Join-Path $stage 'kite.exe')
+    Copy-Item -LiteralPath (Join-Path $out 'kite-agent.exe') -Destination (Join-Path $stage 'kite-agent.exe')
+    $staged = Join-Path $stage 'kite-agent.exe'
+    & $staged upgrade --from $staged --service-name $svc
+    if ($LASTEXITCODE -ne 0) {
+      Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+      throw "kite-agent upgrade failed ($LASTEXITCODE)"
+    }
+  } else {
+    # Copy both, or restore both. A locked kite-agent.exe must not leave a new kite.exe behind.
+    $backs = @()
+    try {
+      foreach ($name in @('kite.exe', 'kite-agent.exe')) {
+        $target = Join-Path $dest $name
+        $src = Join-Path $out $name
+        $bak = $target + '.prev'
+        if (Test-Path -LiteralPath $target) {
+          if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
+          Move-Item -LiteralPath $target -Destination $bak
+          $backs += ,@($target, $bak)
+        }
+        Copy-Item -LiteralPath $src -Destination $target
+        Unblock-File -LiteralPath $target
+      }
+      foreach ($pair in $backs) {
+        Remove-Item -LiteralPath $pair[1] -Force -ErrorAction SilentlyContinue
+      }
+    } catch {
+      for ($i = $backs.Count - 1; $i -ge 0; $i--) {
+        $target = $backs[$i][0]
+        $bak = $backs[$i][1]
+        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $bak) { Move-Item -LiteralPath $bak -Destination $target }
+      }
+      throw "could not replace the binaries (is $svc running?). The previous files were put back. $_"
+    }
   }
 
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -218,7 +304,12 @@ try {
   Write-Host "Installed kite $Version to $dest"
   if ($Agent) {
     $exe = Join-Path $dest 'kite-agent.exe'
-    & $exe install --relay $Relay --code $Code
+    if (-not (Test-Path $exe)) { $exe = Join-Path $out 'kite-agent.exe' }
+    $installArgs = @('install', '--relay', $Relay, '--code', $Code)
+    if (-not [string]::IsNullOrWhiteSpace($ServiceName)) {
+      $installArgs += @('--service-name', $ServiceName)
+    }
+    & $exe @installArgs
     if ($LASTEXITCODE -ne 0) { throw "kite-agent install failed ($LASTEXITCODE)" }
     Write-Host 'Next, on this machine: kite-agent pair'
   }

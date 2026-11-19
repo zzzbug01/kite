@@ -200,7 +200,17 @@ func writeEndpoint(path string, ep Endpoint) error {
 			return err2
 		}
 	}
-	return os.Chmod(path, 0o600)
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	// KITE_CONTROL_USER is the person who ran install (SUDO_USER). The
+	// service rewrites this file as root; chown it back so pair works
+	// without another elevation prompt.
+	owner := strings.TrimSpace(os.Getenv("KITE_CONTROL_USER"))
+	if owner == "" {
+		owner = strings.TrimSpace(os.Getenv("SUDO_USER"))
+	}
+	return ShareControlFile(path, owner)
 }
 
 // Call reads the endpoint file and performs one operation.

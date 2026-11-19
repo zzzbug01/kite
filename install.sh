@@ -7,6 +7,7 @@
 # KITE_VERSION (or --version) pins a tag such as v0.1.0-rc.3.
 # --relay-server also installs kite-relay, and only on Linux.
 # KITE_GITHUB_API and KITE_RELEASE_BASE override the download locations.
+# KITE_BIN_DIR and KITE_NO_SUDO are test hooks.
 set -eu
 
 repo="zzzbug01/kite"
@@ -18,6 +19,7 @@ agent=0
 relay=""
 code=""
 relay_server=0
+service_name="${KITE_SERVICE_NAME:-}"
 
 usage() {
   echo "Usage: install.sh [--version vX] [--agent --relay HOST --code ABCD-EFGH] [--relay-server]" >&2
@@ -72,6 +74,19 @@ while [ $# -gt 0 ]; do
       ;;
     --relay-server)
       relay_server=1
+      shift
+      ;;
+    --service-name)
+      shift
+      if [ $# -lt 1 ]; then
+        echo "install.sh: --service-name needs a value" >&2
+        exit 1
+      fi
+      service_name=$1
+      shift
+      ;;
+    --service-name=*)
+      service_name=${1#--service-name=}
       shift
       ;;
     -h|--help)
@@ -177,8 +192,14 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/kite-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 echo "Downloading ${archive}"
-curl -fsSL --retry 3 --retry-delay 1 -A kite-install -o "${tmp}/${archive}" "${base}/${archive}"
-curl -fsSL --retry 3 --retry-delay 1 -A kite-install -o "${tmp}/SHA256SUMS" "${base}/SHA256SUMS"
+if ! curl -fsSL --retry 3 --retry-delay 1 -A kite-install -o "${tmp}/${archive}" "${base}/${archive}"; then
+  echo "install.sh: release ${version} was not found" >&2
+  exit 1
+fi
+if ! curl -fsSL --retry 3 --retry-delay 1 -A kite-install -o "${tmp}/SHA256SUMS" "${base}/SHA256SUMS"; then
+  echo "install.sh: release ${version} was not found (no SHA256SUMS)" >&2
+  exit 1
+fi
 
 want=$(awk -v f="$archive" '
   $1 ~ /^[0-9A-Fa-f][0-9A-Fa-f]*$/ && length($1) == 64 {
@@ -273,14 +294,21 @@ case ":${PATH}:" in
 esac
 
 if [ "$agent" -eq 1 ]; then
-  if [ "$(id -u)" -eq 0 ]; then
-    "${bindir}/kite-agent" install --relay "$relay" --code "$code"
+  extra=""
+  if [ -n "$service_name" ]; then
+    extra="--service-name ${service_name}"
+  fi
+  if [ "$(id -u)" -eq 0 ] || [ "${KITE_NO_SUDO:-}" = "1" ]; then
+    # shellcheck disable=SC2086
+    "${bindir}/kite-agent" install --relay "$relay" --code "$code" $extra
   elif command -v sudo >/dev/null 2>&1; then
-    sudo "${bindir}/kite-agent" install --relay "$relay" --code "$code"
+    # shellcheck disable=SC2086
+    sudo "${bindir}/kite-agent" install --relay "$relay" --code "$code" $extra
   else
-    echo "install.sh: kite-agent install needs root. Re-run:" >&2
-    echo "  sudo ${bindir}/kite-agent install --relay ${relay} --code ${code}" >&2
+    echo "install.sh: kite-agent install needs root. The install code was not used. Re-run:" >&2
+    echo "  sudo ${bindir}/kite-agent install --relay ${relay} --code ${code} ${extra}" >&2
     exit 1
   fi
   echo "Next, on this machine: kite-agent pair"
+  echo "If that cannot read the control file: sudo kite-agent pair"
 fi

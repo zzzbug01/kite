@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -61,19 +62,11 @@ func run(args []string) error {
 		if done || err != nil {
 			return err
 		}
-		if opt.Code != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			token, name, redeemErr := invite.Redeem(ctx, opt.Config.RelayAddr, opt.Code, opt.Config.Name)
-			cancel()
-			if redeemErr != nil {
-				return redeemErr
-			}
-			opt.Config.AgentToken = token
-			opt.Config.RegistrationKey = ""
-			if name != "" {
-				opt.Config.Name = name
-			}
-			fmt.Fprintf(os.Stdout, "install code accepted for %s\n", opt.Config.Name)
+		if u := defaultSSHUser(); u != "" {
+			opt.Config.ControlUser = u
+		}
+		if err := agentsvc.Preflight(opt); err != nil {
+			return err
 		}
 		if !opt.SkipSSHSetup {
 			rep, setupErr := sshsetup.Ensure(context.Background(), opt.Config.LocalSSHAddr)
@@ -107,7 +100,36 @@ func run(args []string) error {
 		} else {
 			fmt.Fprintf(os.Stdout, "local ssh: %s (configured)\n", opt.Config.LocalSSHAddr)
 		}
-		return agentsvc.Install(opt)
+		var redeemedToken, redeemedName string
+		if opt.Code != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			token, name, redeemErr := invite.Redeem(ctx, opt.Config.RelayAddr, opt.Code, opt.Config.Name, opt.NameExplicit)
+			cancel()
+			if redeemErr != nil {
+				return redeemErr
+			}
+			opt.Config.AgentToken = token
+			opt.Config.RegistrationKey = ""
+			opt.Config.TokenFromFile = true
+			if name != "" {
+				opt.Config.Name = name
+			}
+			redeemedToken, redeemedName = token, opt.Config.Name
+			fmt.Fprintf(os.Stdout, "install code accepted for %s\n", opt.Config.Name)
+		}
+		if err := agentsvc.Install(opt); err != nil {
+			if redeemedToken != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if revErr := invite.RevokeToken(ctx, opt.Config.RelayAddr, redeemedToken, redeemedName); revErr != nil {
+					fmt.Fprintf(os.Stderr, "kite-agent: could not revoke the unused agent token: %s\n", revErr)
+				} else {
+					fmt.Fprintln(os.Stderr, "kite-agent: revoked the agent token because install did not finish")
+				}
+				cancel()
+			}
+			return err
+		}
+		return nil
 	case agentsvc.CmdPair:
 		return runPair(rest)
 	case agentsvc.CmdUnpair:
@@ -177,6 +199,11 @@ func run(args []string) error {
 			return err
 		}
 		if !opt.Apply && opt.From == "" {
+			if !opt.Check {
+				if err := agentsvc.RequireUpgradePriv(); err != nil {
+					return err
+				}
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			fetched, err := fetchRelease(ctx, "kite-agent", opt.Version, opt.Check)
@@ -186,7 +213,23 @@ func run(args []string) error {
 			if fetched.done {
 				return nil
 			}
+			if err := guardTokenDowngrade(opt, fetched.tag); err != nil {
+				os.RemoveAll(filepath.Dir(fetched.path))
+				return err
+			}
+			stage := filepath.Dir(fetched.path)
+			if runtime.GOOS != "windows" {
+				defer os.RemoveAll(stage)
+			}
 			opt.From = fetched.path
+			rememberSSHUser(opt.ServiceName, "")
+			err = agentsvc.Upgrade(opt)
+			// On Windows the scheduled task copies this file after we return.
+			// It deletes the stage itself. If the task never started, delete it here.
+			if runtime.GOOS == "windows" && err != nil {
+				os.RemoveAll(stage)
+			}
+			return err
 		}
 		rememberSSHUser(opt.ServiceName, "")
 		return agentsvc.Upgrade(opt)

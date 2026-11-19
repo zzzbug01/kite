@@ -42,7 +42,7 @@ func TestIssueRedeemSurvivesRestart(t *testing.T) {
 	}
 
 	reopened := Open(dir)
-	token, agent, err := reopened.Redeem(code, "my-pc", now.Add(time.Minute))
+	token, agent, err := reopened.Redeem(code, "my-pc", false, now.Add(time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestIssueRedeemSurvivesRestart(t *testing.T) {
 	if reopened.Authenticate(token, "other") {
 		t.Fatal("token accepted for a different agent")
 	}
-	if _, _, err := reopened.Redeem(strings.ToLower(code), "my-pc", now.Add(time.Minute)); !errors.Is(err, ErrUsed) {
+	if _, _, err := reopened.Redeem(strings.ToLower(code), "my-pc", false, now.Add(time.Minute)); !errors.Is(err, ErrUsed) {
 		t.Fatalf("second redeem: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".install.lock")); !errors.Is(err, os.ErrNotExist) {
@@ -78,7 +78,7 @@ func TestExpiredAndWrongNameDoNotIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Redeem(code, "desktop", now); !errors.Is(err, ErrExpired) {
+	if _, _, err := s.Redeem(code, "desktop", true, now); !errors.Is(err, ErrExpired) {
 		t.Fatalf("expired: %v", err)
 	}
 	listed, err := s.List()
@@ -93,17 +93,31 @@ func TestExpiredAndWrongNameDoNotIssue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.Redeem(fresh, "other", now); !errors.Is(err, ErrName) {
+	if _, _, err := s.Redeem(fresh, "other", true, now); !errors.Is(err, ErrName) {
 		t.Fatalf("name: %v", err)
 	}
-	token, agent, err := s.Redeem(fresh, "desktop", now)
+	adopted, adoptedName, err := s.Redeem(fresh, "hostname", false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adoptedName != "desktop" || adopted == "" {
+		t.Fatalf("adopt %s %s", adoptedName, adopted)
+	}
+	if _, err := s.Revoke("desktop"); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _, err = s.Issue("desktop", time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, agent, err := s.Redeem(fresh, "desktop", true, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if agent != "desktop" || token == "" {
 		t.Fatalf("%s %s", agent, token)
 	}
-	if _, _, err := s.Redeem("not-a-code", "desktop", now); !errors.Is(err, ErrInvalid) {
+	if _, _, err := s.Redeem("not-a-code", "desktop", false, now); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid: %v", err)
 	}
 }
@@ -115,7 +129,7 @@ func TestRevokeDropsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := s.Redeem(code, "my-pc", now)
+	token, _, err := s.Redeem(code, "my-pc", false, now)
 	if err != nil {
 		t.Fatal(err)
 	}

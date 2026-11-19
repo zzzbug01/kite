@@ -5,11 +5,12 @@ import "testing"
 func TestSanitizeHostname(t *testing.T) {
 	cases := map[string]string{
 		"My-PC":             "my-pc",
-		"DESKTOP-ABC.local": "desktop-abc.local",
+		"DESKTOP-ABC.local":     "desktop-abc",
+		"Mac.example.com":       "mac",
 		"Foo Bar":           "foo-bar",
 		"  Hello_World  ":   "hello_world",
 		"---weird---":       "weird",
-		"name.with...dots":  "name.with...dots",
+		"name.with...dots":      "name",
 	}
 	for in, want := range cases {
 		if got := SanitizeHostname(in); got != want {

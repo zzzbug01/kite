@@ -33,6 +33,9 @@ func AgentEnvFile(a config.Agent) (string, error) {
 	if strings.TrimSpace(a.SSHUser) != "" {
 		rows = append(rows, [2]string{"SSH_USER", a.SSHUser})
 	}
+	if strings.TrimSpace(a.ControlUser) != "" {
+		rows = append(rows, [2]string{"KITE_CONTROL_USER", a.ControlUser})
+	}
 	for _, row := range rows {
 		quoted, err := quoteEnv(row[1])
 		if err != nil {

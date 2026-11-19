@@ -174,7 +174,11 @@ func (s *Store) Issue(name string, ttl time.Duration, now time.Time) (string, ti
 // Redeem checks code, and on success stores a new agent token bound to the
 // agent name and only then marks the code used. A mismatch, an expired code,
 // or a write failure leaves the code usable until it expires.
-func (s *Store) Redeem(code, name string, now time.Time) (token, agent string, err error) {
+//
+// When the code was issued for a name and explicit is false, that bound name
+// is used even if name is the machine's hostname. explicit means the operator
+// passed --name, which must match.
+func (s *Store) Redeem(code, name string, explicit bool, now time.Time) (token, agent string, err error) {
 	name = strings.TrimSpace(name)
 	if now.IsZero() {
 		now = time.Now()
@@ -216,7 +220,7 @@ func (s *Store) Redeem(code, name string, now time.Time) (token, agent string, e
 	}
 	agent = name
 	if rec.Name != "" {
-		if name != "" && name != rec.Name {
+		if explicit && name != "" && name != rec.Name {
 			return "", "", ErrName
 		}
 		agent = rec.Name
@@ -442,6 +446,35 @@ func hashCode(norm string) []byte {
 func hashToken(raw string) []byte {
 	sum := sha256.Sum256([]byte("kite-agent-token-v1:" + raw))
 	return sum[:]
+}
+
+// HashAgentToken is the hex hash stored for an agent token.
+func HashAgentToken(raw string) string {
+	return hex.EncodeToString(hashToken(raw))
+}
+
+// TokenHash returns the stored hash for name. ok is false when that agent
+// has no token.
+func (s *Store) TokenHash(name string) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", false
+	}
+	unlock, err := acquire(s.dir)
+	if err != nil {
+		return "", false
+	}
+	defer unlock()
+	doc, err := s.read()
+	if err != nil {
+		return "", false
+	}
+	for _, rec := range doc.Agents {
+		if rec.Name == name && rec.TokenHash != "" {
+			return rec.TokenHash, true
+		}
+	}
+	return "", false
 }
 
 func newToken() (raw, id string, err error) {

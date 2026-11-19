@@ -164,14 +164,25 @@ func applyUpgrade(opt UpgradeOptions) error {
 		return err
 	}
 	note("copying " + from + " to " + dest)
-	if !samePath(from, dest) {
-		if err := copyFileRetry(dest, from); err != nil {
-			note("upgrade failed: " + err.Error())
-			_ = startAndWait(s, logPath)
-			return err
-		}
+	// Stopped above. Replace kite.exe and kite-agent.exe together. A failure
+	// puts the previous files back and starts the old binary.
+	var pairs [][2]string
+	kiteSrc := filepath.Join(filepath.Dir(from), "kite.exe")
+	kiteDst := filepath.Join(filepath.Dir(dest), "kite.exe")
+	if st, statErr := os.Stat(kiteSrc); statErr == nil && !st.IsDir() && !pathsEqual(kiteSrc, kiteDst) {
+		pairs = append(pairs, [2]string{kiteSrc, kiteDst})
 	}
-	copyOptionalSibling(from, filepath.Dir(dest), "kite.exe")
+	if !pathsEqual(from, dest) {
+		pairs = append(pairs, [2]string{from, dest})
+	}
+	cleanup, err := replaceFiles(pairs)
+	if err != nil {
+		note("upgrade failed: " + err.Error())
+		_ = startAndWait(s, logPath)
+		return err
+	}
+	cleanup()
+	removeUpgradeStage(from)
 	note("starting " + name)
 	if err := startAndWait(s, logPath); err != nil {
 		note("upgrade failed: " + err.Error())
@@ -179,6 +190,20 @@ func applyUpgrade(opt UpgradeOptions) error {
 	}
 	note("upgrade ok: " + name + " running " + dest)
 	return nil
+}
+
+// removeUpgradeStage deletes the private download directory created by
+// kite-agent upgrade. It does not touch a path the operator passed to --from.
+// The scheduled task is this binary, so the directory stays locked until the
+// process exits. cmd removes it a few seconds later.
+func removeUpgradeStage(from string) {
+	dir := filepath.Dir(from)
+	if !strings.Contains(filepath.Base(dir), "kite-upgrade-") {
+		return
+	}
+	cmd := exec.Command("cmd", "/c", "ping -n 4 127.0.0.1 >nul & rmdir /s /q \""+dir+"\"")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = cmd.Start()
 }
 
 func absFile(path string) (string, error) {

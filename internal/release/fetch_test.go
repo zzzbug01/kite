@@ -160,11 +160,27 @@ func TestOlderAndSame(t *testing.T) {
 	if !SameVersion("v0.1.0-rc.3", "v0.1.0-rc.3") || SameVersion("dev", "v0.1.0") {
 		t.Fatal("same")
 	}
-	if !Older("v0.1.0-rc.2", "v0.1.0-rc.10") || !Older("v0.1.0-rc.3", "v0.1.0") || !Older("dev", "v0.1.0") {
+	if !Older("v0.1.0-rc.2", "v0.1.0-rc.10") || !Older("v0.1.0-rc.3", "v0.1.0") {
 		t.Fatal("older")
+	}
+	if Older("dev", "v0.1.0") || Older("af09a24", "v0.1.0-rc.3") || !KnownBuild("v0.1.0-rc.3") || KnownBuild("dev") {
+		t.Fatal("unknown builds are not older and are not release builds")
+	}
+	// A git-describe build is newer than its base tag, so upgrade must not go backwards.
+	if Older("v0.1.0-rc.3-2-gaf09a24", "v0.1.0-rc.3") || Older("v0.1.0-rc.4-pr3", "v0.1.0-rc.3") {
+		t.Fatal("describe and pr builds must not look older than rc.3")
+	}
+	if !Older("v0.1.0-rc.3-2-gaf09a24", "v0.1.0-rc.4") {
+		t.Fatal("describe after rc.3 is still older than rc.4")
 	}
 	if Older("v0.1.0", "v0.1.0-rc.9") || Older("v0.2.0", "v0.1.9") {
 		t.Fatal("not older")
+	}
+	if SupportsAgentToken("v0.1.0-rc.3") || SupportsAgentToken("v0.1.0-rc.2") {
+		t.Fatal("rc.3 and earlier have no agent tokens")
+	}
+	if !SupportsAgentToken("v0.1.0-rc.4") || !SupportsAgentToken("v0.1.0") {
+		t.Fatal("later releases have agent tokens")
 	}
 }
 

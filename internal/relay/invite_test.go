@@ -55,9 +55,17 @@ func TestInviteRedeemAndAgentToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	badName := postInvite(t, base, code, "other")
+	badName := postInviteExplicit(t, base, code, "other", true)
 	if badName.StatusCode != http.StatusConflict || !strings.Contains(badName.Body, "different agent") {
 		t.Fatalf("name: %d %s", badName.StatusCode, badName.Body)
+	}
+	adoptCode, _, err := store.Issue("desktop", time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adopted := postInvite(t, base, adoptCode, "hostname")
+	if adopted.StatusCode != http.StatusOK || !strings.Contains(adopted.Body, `"agent":"desktop"`) {
+		t.Fatalf("adopt: %d %s", adopted.StatusCode, adopted.Body)
 	}
 
 	ok := postInvite(t, base, code, "my-pc")
@@ -165,6 +173,79 @@ func TestInviteRateLimit(t *testing.T) {
 	}
 }
 
+func TestRevokeDropsLiveTokenSession(t *testing.T) {
+	dir := t.TempDir()
+	srv := New(Config{
+		RegistrationKey: "test-key",
+		StateDir:        dir,
+		IdleTimeout:     time.Hour,
+		PingInterval:    time.Hour,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	store := invite.Open(dir)
+	now := time.Now().UTC()
+	code, _, err := store.Issue("box", time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, name, err := store.Redeem(code, "hostname", false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "box" {
+		t.Fatalf("adopted name %s", name)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	tokenConn := newAgentConn(srv, "box", nil, ctx, cancel)
+	tokenConn.tokenAuth = true
+	tokenConn.tokenHash = invite.HashAgentToken(token)
+
+	regCtx, regCancel := context.WithCancel(context.Background())
+	t.Cleanup(regCancel)
+	regConn := newAgentConn(srv, "legacy", nil, regCtx, regCancel)
+
+	srv.mu.Lock()
+	srv.agents["box"] = tokenConn
+	srv.agents["legacy"] = regConn
+	srv.mu.Unlock()
+
+	if _, err := store.Revoke("box"); err != nil {
+		t.Fatal(err)
+	}
+	srv.dropRevokedAgents()
+	select {
+	case <-tokenConn.done:
+	default:
+		t.Fatal("token session still open after revoke")
+	}
+	select {
+	case <-regConn.done:
+		t.Fatal("registration-key session was closed")
+	default:
+	}
+
+	code2, _, err := store.Issue("box", time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Redeem(code2, "box", true, now); err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	replaced := newAgentConn(srv, "box", nil, ctx2, cancel2)
+	replaced.tokenAuth = true
+	replaced.tokenHash = invite.HashAgentToken(token)
+	srv.mu.Lock()
+	srv.agents["box"] = replaced
+	srv.mu.Unlock()
+	srv.dropRevokedAgents()
+	select {
+	case <-replaced.done:
+	default:
+		t.Fatal("session with a replaced token stayed open")
+	}
+}
+
 type apiResult struct {
 	StatusCode int
 	Body       string
@@ -172,7 +253,12 @@ type apiResult struct {
 
 func postInvite(t *testing.T, base, code, name string) apiResult {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"code": code, "name": name})
+	return postInviteExplicit(t, base, code, name, false)
+}
+
+func postInviteExplicit(t *testing.T, base, code, name string, explicit bool) apiResult {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"code": code, "name": name, "explicit_name": explicit})
 	resp, err := http.Post(base+"/invite/redeem", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
