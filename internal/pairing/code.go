@@ -69,6 +69,15 @@ func FormatCode(norm string) string {
 	return norm[:4] + "-" + norm[4:]
 }
 
+// GenerateCode returns a new display code such as ABCD-EFGH.
+func GenerateCode() (string, error) {
+	norm, err := newCode()
+	if err != nil {
+		return "", err
+	}
+	return FormatCode(norm), nil
+}
+
 func newCode() (string, error) {
 	var b [codeLen]byte
 	n := len(Alphabet)

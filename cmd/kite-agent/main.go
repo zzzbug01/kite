@@ -12,11 +12,14 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/zzzbug01/kite/internal/agent"
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
+	"github.com/zzzbug01/kite/internal/invite"
 	"github.com/zzzbug01/kite/internal/process"
+	"github.com/zzzbug01/kite/internal/release"
 	"github.com/zzzbug01/kite/internal/sshaddr"
 	"github.com/zzzbug01/kite/internal/sshheal"
 	"github.com/zzzbug01/kite/internal/sshsetup"
@@ -24,6 +27,9 @@ import (
 )
 
 func main() {
+	if exe, err := os.Executable(); err == nil {
+		release.CleanupOld(exe)
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	if err := run(os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintf(os.Stderr, "kite-agent: %s\n", err)
@@ -54,6 +60,20 @@ func run(args []string) error {
 		opt, done, err := ready(rest, true)
 		if done || err != nil {
 			return err
+		}
+		if opt.Code != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			token, name, redeemErr := invite.Redeem(ctx, opt.Config.RelayAddr, opt.Code, opt.Config.Name)
+			cancel()
+			if redeemErr != nil {
+				return redeemErr
+			}
+			opt.Config.AgentToken = token
+			opt.Config.RegistrationKey = ""
+			if name != "" {
+				opt.Config.Name = name
+			}
+			fmt.Fprintf(os.Stdout, "install code accepted for %s\n", opt.Config.Name)
 		}
 		if !opt.SkipSSHSetup {
 			rep, setupErr := sshsetup.Ensure(context.Background(), opt.Config.LocalSSHAddr)
@@ -155,6 +175,18 @@ func run(args []string) error {
 		}
 		if err != nil {
 			return err
+		}
+		if !opt.Apply && opt.From == "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			fetched, err := fetchRelease(ctx, "kite-agent", opt.Version, opt.Check)
+			if err != nil {
+				return err
+			}
+			if fetched.done {
+				return nil
+			}
+			opt.From = fetched.path
 		}
 		rememberSSHUser(opt.ServiceName, "")
 		return agentsvc.Upgrade(opt)
@@ -275,9 +307,14 @@ func runService(args []string) error {
 }
 
 func runAgent(ctx context.Context, opt agentsvc.Options) error {
+	secret, kind, err := opt.Config.Credential()
+	if err != nil {
+		return err
+	}
 	return agent.Run(ctx, agent.Config{
 		RelayURL:        opt.Config.RelayAddr,
-		RegistrationKey: opt.Config.RegistrationKey,
+		RegistrationKey: secret,
+		Auth:            kind,
 		Name:            opt.Config.Name,
 		LocalSSHAddr:    opt.Config.LocalSSHAddr,
 		IdleTimeout:     opt.Config.IdleTimeout,

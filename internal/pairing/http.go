@@ -7,15 +7,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
+
+	"github.com/zzzbug01/kite/internal/config"
 )
 
-// CreateRequest is POST /pair. Key is the agent registration key. It is
-// checked and discarded; it is not written into the pairing code.
+// CreateRequest is POST /pair. Key is the agent registration key, or an
+// agent token when Auth is "agent". It is checked and discarded; it is not
+// written into the pairing code.
 type CreateRequest struct {
 	Key        string `json:"key"`
+	Auth       string `json:"auth,omitempty"`
 	Agent      string `json:"agent"`
 	SSHUser    string `json:"ssh_user,omitempty"`
 	ClientURL  string `json:"client_url"`
@@ -58,10 +61,11 @@ func (e *APIError) Error() string {
 	return e.Message
 }
 
-// HTTPBase converts a ws:// or wss:// relay URL to the HTTP origin used for
-// POST /pair. The path is dropped; Caddy and nginx proxy the whole host.
+// HTTPBase converts a relay address to the HTTP origin used for POST /pair
+// and POST /invite/redeem. A bare host, host:port, and http(s) URLs are
+// accepted. The path is dropped; Caddy and nginx proxy the whole host.
 func HTTPBase(relayURL string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(relayURL))
+	u, err := config.ParseRelayURL(relayURL)
 	if err != nil {
 		return "", err
 	}
@@ -70,12 +74,8 @@ func HTTPBase(relayURL string) (string, error) {
 		u.Scheme = "http"
 	case "wss":
 		u.Scheme = "https"
-	case "http", "https":
 	default:
 		return "", fmt.Errorf("relay URL must be ws:// or wss://, got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return "", errorsMissingHost
 	}
 	u.Path = ""
 	u.RawPath = ""
@@ -86,19 +86,12 @@ func HTTPBase(relayURL string) (string, error) {
 
 // ClientURL is the WebSocket URL a paired laptop should dial.
 // An agent URL ending in /agent becomes /client. Any other path is replaced
-// with /client as well, which matches kite's default routes.
+// with /client as well, which matches kite's default routes. A bare host
+// and an https URL are accepted.
 func ClientURL(relayURL string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(relayURL))
+	u, err := config.ParseRelayURL(relayURL)
 	if err != nil {
 		return "", err
-	}
-	switch u.Scheme {
-	case "ws", "wss":
-	default:
-		return "", fmt.Errorf("relay URL must be ws:// or wss://, got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return "", errorsMissingHost
 	}
 	u.Path = "/client"
 	u.RawPath = ""
@@ -106,8 +99,6 @@ func ClientURL(relayURL string) (string, error) {
 	u.Fragment = ""
 	return u.String(), nil
 }
-
-var errorsMissingHost = fmt.Errorf("relay URL is missing a host")
 
 // PostCreate asks the relay for a pairing code.
 func PostCreate(ctx context.Context, httpBase string, req CreateRequest) (CreateResponse, error) {

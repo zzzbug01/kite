@@ -112,11 +112,17 @@ func TestClientURLAndHTTPBase(t *testing.T) {
 	if err != nil || got != "wss://tunnel.example.com/client" {
 		t.Fatalf("%s %v", got, err)
 	}
-	if _, err := HTTPBase("https://tunnel.example.com/agent"); err != nil {
-		t.Fatal(err)
+	base, err = HTTPBase("https://tunnel.example.com/agent")
+	if err != nil || base != "https://tunnel.example.com" {
+		t.Fatalf("https base %s %v", base, err)
 	}
-	if _, err := ClientURL("http://tunnel.example.com"); err == nil {
-		t.Fatal("expected scheme error")
+	got, err = ClientURL("http://tunnel.example.com")
+	if err != nil || got != "ws://tunnel.example.com/client" {
+		t.Fatalf("http client %s %v", got, err)
+	}
+	got, err = ClientURL("tunnel.example.com")
+	if err != nil || got != "wss://tunnel.example.com/client" {
+		t.Fatalf("bare %s %v", got, err)
 	}
 }
 

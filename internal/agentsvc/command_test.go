@@ -108,6 +108,32 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestInstallCodeSkipsRegistrationKey(t *testing.T) {
+	isolateConfigEnv(t)
+	t.Setenv("RELAY_ADDR", "")
+	t.Setenv("REGISTRATION_KEY", "")
+	t.Setenv("AGENT_TOKEN", "")
+	t.Setenv("AGENT_NAME", "")
+	t.Setenv("SSH_USER", "")
+	opt, err := ParseOptions([]string{"--relay", "tunnel.example.com", "--code", "ABCD-EFGH"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.Code != "ABCD-EFGH" {
+		t.Fatal(opt.Code)
+	}
+	if opt.Config.RelayAddr != "wss://tunnel.example.com/agent" {
+		t.Fatal(opt.Config.RelayAddr)
+	}
+	if opt.Config.Name == "" || opt.Config.Name == "connect" {
+		t.Fatal(opt.Config.Name)
+	}
+	t.Setenv("AGENT_NAME", "connect")
+	if _, err := ParseOptions([]string{"--relay", "tunnel.example.com", "--code", "ABCD-EFGH"}, true); err == nil {
+		t.Fatal("connect should be reserved")
+	}
+}
+
 func TestHelpHidesRegistrationKey(t *testing.T) {
 	isolateConfigEnv(t)
 	t.Setenv("RELAY_ADDR", "ws://127.0.0.1:8080/agent")
@@ -280,7 +306,7 @@ func TestControlPlaneOffWindows(t *testing.T) {
 		"stop":      Stop(""),
 		"restart":   Restart(""),
 		"service":   Serve("", nil),
-		"upgrade":   Upgrade(UpgradeOptions{From: "kite-agent.exe"}),
+		"upgrade":   Upgrade(UpgradeOptions{Apply: true, From: "kite-agent.exe"}),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "Windows") {
 			t.Fatalf("%s: %v", name, err)
@@ -377,10 +403,17 @@ func TestInstanceLayout(t *testing.T) {
 }
 
 func TestUpgradeCommand(t *testing.T) {
-	if _, err := ParseUpgrade(nil); err == nil {
-		t.Fatal("expected --from")
+	opt, err := ParseUpgrade(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	opt, err := ParseUpgrade([]string{"--from", `D:\new\kite-agent.exe`, "--service-name", "kite-agent-test"})
+	if opt.From != "" || opt.Apply || opt.Check {
+		t.Fatalf("download upgrade: %+v", opt)
+	}
+	if _, err := ParseUpgrade([]string{"--apply"}); err == nil {
+		t.Fatal("expected --from with --apply")
+	}
+	opt, err = ParseUpgrade([]string{"--from", `D:\new\kite-agent.exe`, "--service-name", "kite-agent-test"})
 	if err != nil {
 		t.Fatal(err)
 	}

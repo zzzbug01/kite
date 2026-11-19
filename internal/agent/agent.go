@@ -37,6 +37,9 @@ type Config struct {
 	HTTPClient *http.Client
 	// SSHUser is the account whose authorized_keys receives paired keys.
 	SSHUser string
+	// Auth is "agent" when RegistrationKey holds an install-code token.
+	// Empty means the shared registration key.
+	Auth string
 	// SSHAdmin forces the Windows administrators_authorized_keys path when
 	// non-nil. Nil detects membership of the Administrators group.
 	SSHAdmin *bool
@@ -186,12 +189,16 @@ func (cfg Config) logger() *slog.Logger {
 func serve(ctx context.Context, ws *websocket.Conn, cfg Config) error {
 	cfg = cfg.normalized()
 	log := cfg.logger()
-	hello, err := protocol.MarshalHello(protocol.Hello{
+	helloMsg := protocol.Hello{
 		Role:     "agent",
 		Key:      cfg.RegistrationKey,
 		Name:     cfg.Name,
 		Features: []string{protocol.FeaturePair},
-	})
+	}
+	if cfg.Auth == "agent" {
+		helloMsg.Auth = "agent"
+	}
+	hello, err := protocol.MarshalHello(helloMsg)
 	if err != nil {
 		return err
 	}

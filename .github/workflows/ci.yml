@@ -10,7 +10,18 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            race: true
+          - os: macos-latest
+            race: true
+          - os: windows-latest
+            race: false
     steps:
       - uses: actions/checkout@v4
 
@@ -22,19 +33,12 @@ jobs:
         run: go vet ./...
 
       - name: Test
+        if: matrix.race
         run: go test -race ./...
 
-      - name: Windows cross-compile
-        run: |
-          set -euo pipefail
-          export CGO_ENABLED=0
-          export GOOS=windows
-          export GOARCH=amd64
-          go vet ./...
-          go build -o /tmp/kite.exe ./cmd/kite
-          go build -o /tmp/kite-agent.exe ./cmd/kite-agent
-          go build -o /tmp/kite-relay.exe ./cmd/kite-relay
-          go test -c -o /tmp/agentsvc.test.exe ./internal/agentsvc/
+      - name: Test
+        if: ${{ !matrix.race }}
+        run: go test ./...
 
   # Pre-merge packages. Tag pushes still publish only through release.yml,
   # which marks hyphenated tags as GitHub prereleases.

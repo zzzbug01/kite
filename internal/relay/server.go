@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/zzzbug01/kite/internal/auth"
+	"github.com/zzzbug01/kite/internal/invite"
 	"github.com/zzzbug01/kite/internal/pairing"
 	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/wsutil"
@@ -56,6 +57,8 @@ type Server struct {
 	log  *slog.Logger
 
 	tokens    *pairing.Store
+	invites   *invite.Store
+	inviteLim *pairing.Limiter
 	broker    *pairing.Broker
 	trusted   []*net.IPNet
 	handshake time.Duration
@@ -94,6 +97,8 @@ func New(cfg Config) *Server {
 		ping:      ping,
 		log:       log,
 		tokens:    pairing.Open(cfg.StateDir),
+		invites:   invite.Open(cfg.StateDir),
+		inviteLim: pairing.NewLimiter(),
 		broker:    pairing.NewBroker(pairing.Config{TTL: cfg.PairTTL}),
 		trusted:   cfg.TrustedProxies,
 		handshake: handshake,
@@ -104,6 +109,7 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("/client", s.handleClient)
 	mux.HandleFunc("POST /pair", s.handlePairCreate)
 	mux.HandleFunc("POST /pair/redeem", s.handlePairRedeem)
+	mux.HandleFunc("POST /invite/redeem", s.handleInviteRedeem)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -193,7 +199,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if hello.Role != "agent" || !protocol.ValidName(hello.Name) {
+	if hello.Role != "agent" || protocol.CheckAgentName(hello.Name) != nil {
 		s.reject(ctx, ws, protocol.ReasonBadHello)
 		return
 	}
@@ -364,12 +370,16 @@ func (s *Server) readHello(ctx context.Context, ws *websocket.Conn, _ string) (p
 	return h, true
 }
 
-// authorize checks a registration key or a per-client token. An empty Auth
-// field is the v0.1.0-rc.2 registration-key handshake.
+// authorize checks a registration key, a per-agent token, or a per-client
+// token. An empty Auth field is the v0.1.0-rc.2 registration-key handshake.
 func (s *Server) authorize(h *protocol.Hello) string {
 	switch h.Auth {
 	case "", "registration":
 		if !s.registrationOK(h.Key) {
+			return protocol.ReasonUnauthorized
+		}
+	case "agent":
+		if h.Role != "agent" || protocol.CheckAgentName(h.Name) != nil || !s.invites.Authenticate(h.Key, h.Name) {
 			return protocol.ReasonUnauthorized
 		}
 	case "client":
@@ -380,9 +390,25 @@ func (s *Server) authorize(h *protocol.Hello) string {
 			return protocol.ReasonUnauthorized
 		}
 	default:
-		return "unsupported credential; this relay only accepts a registration key or a paired client token"
+		return "unsupported credential; this relay accepts a registration key, an agent token, or a paired client token"
 	}
 	return ""
+}
+
+// agentCredential accepts the shared registration key, or an agent token
+// when auth is "agent". Both compares run so a token is not a cheaper
+// reject than a wrong registration key.
+func (s *Server) agentCredential(auth, key, name string) bool {
+	reg := s.registrationOK(key)
+	token := s.invites.Authenticate(key, name)
+	switch auth {
+	case "agent":
+		return token
+	case "", "registration":
+		return reg
+	default:
+		return false
+	}
 }
 
 // registrationOK accepts the current key and, during rotation, the previous

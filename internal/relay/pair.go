@@ -25,13 +25,13 @@ func (s *Server) handlePairCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ip := s.clientIP(r)
-	if !s.registrationOK(req.Key) {
-		s.log.Info("pair create rejected", "remote", ip, "result", "unauthorized")
-		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
+	if protocol.CheckAgentName(req.Agent) != nil {
+		writeAPIError(w, http.StatusBadRequest, "agent name is invalid")
 		return
 	}
-	if !protocol.ValidName(req.Agent) {
-		writeAPIError(w, http.StatusBadRequest, "agent name is invalid")
+	if !s.agentCredential(req.Auth, req.Key, req.Agent) {
+		s.log.Info("pair create rejected", "remote", ip, "result", "unauthorized")
+		writeAPIError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	agent := s.lookup(req.Agent)

@@ -51,11 +51,14 @@ type RelaySection struct {
 type AgentSection struct {
 	RelayAddr       string `yaml:"relay_addr"`
 	RegistrationKey string `yaml:"registration_key"`
-	Name            string `yaml:"name"`
-	LocalSSHAddr    string `yaml:"local_ssh_addr"`
-	LocalSSHAuto    bool   `yaml:"local_ssh_addr_auto"`
-	IdleTimeout     string `yaml:"idle_timeout"`
-	SSHUser         string `yaml:"ssh_user"`
+	// AgentToken is a per-agent secret from kite-relay invite. It replaces
+	// the registration key for agents installed with a one-time code.
+	AgentToken   string `yaml:"agent_token,omitempty"`
+	Name         string `yaml:"name"`
+	LocalSSHAddr string `yaml:"local_ssh_addr"`
+	LocalSSHAuto bool   `yaml:"local_ssh_addr_auto"`
+	IdleTimeout  string `yaml:"idle_timeout"`
+	SSHUser      string `yaml:"ssh_user"`
 }
 
 // ClientSection is the kite client portion of a config file.
@@ -91,8 +94,11 @@ type Relay struct {
 type Agent struct {
 	RelayAddr       string
 	RegistrationKey string
-	Name            string
-	LocalSSHAddr    string
+	// AgentToken is set when this agent was installed with a one-time code.
+	// The relay stores only a hash of it, bound to Name.
+	AgentToken   string
+	Name         string
+	LocalSSHAddr string
 	// LocalSSHAuto is true when kite chose LocalSSHAddr by inspecting sshd.
 	// An explicit --local, LOCAL_SSH_ADDR without LOCAL_SSH_ADDR_AUTO, or a
 	// config value without the auto flag clears it.
@@ -185,6 +191,7 @@ func LoadAgent(explicitPath string) (Agent, error) {
 		IdleTimeout:     protocol.DefaultIdleTimeout,
 		RelayAddr:       file.Agent.RelayAddr,
 		RegistrationKey: file.Agent.RegistrationKey,
+		AgentToken:      file.Agent.AgentToken,
 		Name:            file.Agent.Name,
 		SSHUser:         file.Agent.SSHUser,
 	}
@@ -206,6 +213,9 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	}
 	if v := os.Getenv("REGISTRATION_KEY"); v != "" {
 		cfg.RegistrationKey = v
+	}
+	if v := os.Getenv("AGENT_TOKEN"); v != "" {
+		cfg.AgentToken = v
 	}
 	if v := os.Getenv("AGENT_NAME"); v != "" {
 		cfg.Name = v
@@ -589,6 +599,25 @@ func defaultStateDir() string {
 	return "/var/lib/kite"
 }
 
+// Credential is the secret this agent presents to the relay.
+// A real registration key wins over an agent token so an explicit
+// REGISTRATION_KEY still selects the legacy handshake. An install that
+// used a one-time code stores only the token.
+func (a Agent) Credential() (secret, kind string, err error) {
+	key := strings.TrimSpace(a.RegistrationKey)
+	token := strings.TrimSpace(a.AgentToken)
+	if key != "" && key != PlaceholderKey {
+		return key, "registration", nil
+	}
+	if token != "" {
+		return token, "agent", nil
+	}
+	if key == PlaceholderKey {
+		return "", "", errors.New("REGISTRATION_KEY is still the example placeholder CHANGE_ME; set a real secret or install with --code from kite-relay invite")
+	}
+	return "", "", errors.New("REGISTRATION_KEY or an agent token is required; set the key, or install with --code from kite-relay invite")
+}
+
 // ValidateKey rejects an empty key and the published example placeholder.
 func ValidateKey(key string) error {
 	if strings.TrimSpace(key) == "" {
@@ -600,26 +629,52 @@ func ValidateKey(key string) error {
 	return nil
 }
 
-// NormalizeRelayURL checks a ws:// or wss:// URL and fills defaultPath when
-// the URL has no path of its own.
-func NormalizeRelayURL(raw, defaultPath string) (string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return "", errors.New("RELAY_ADDR is required (for example wss://tunnel.example.com/agent)")
+// ParseRelayURL accepts a bare host, host:port, http(s)://, or ws(s):// URL,
+// with or without a path. https becomes wss and http becomes ws. A missing
+// scheme defaults to wss. The path is left as the caller wrote it.
+func ParseRelayURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("RELAY_ADDR is required (for example wss://tunnel.example.com/agent)")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "wss://" + raw
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("RELAY_ADDR: %w", err)
+		return nil, fmt.Errorf("RELAY_ADDR: %w", err)
 	}
-	switch u.Scheme {
-	case "ws", "wss":
+	switch strings.ToLower(u.Scheme) {
+	case "wss", "https":
+		u.Scheme = "wss"
+	case "ws", "http":
+		u.Scheme = "ws"
 	default:
-		return "", fmt.Errorf("RELAY_ADDR must use ws:// or wss://, got %q", u.Scheme)
+		return nil, fmt.Errorf("RELAY_ADDR must be a host or an http(s)/ws(s) URL, got %q", u.Scheme)
 	}
 	if u.Host == "" {
-		return "", errors.New("RELAY_ADDR is missing a host")
+		return nil, errors.New("RELAY_ADDR is missing a host")
+	}
+	u.Fragment = ""
+	return u, nil
+}
+
+// NormalizeRelayURL checks a relay address and fills defaultPath when the
+// URL has no path of its own. Full ws:// and wss:// URLs keep an explicit path.
+func NormalizeRelayURL(raw, defaultPath string) (string, error) {
+	u, err := ParseRelayURL(raw)
+	if err != nil {
+		return "", err
 	}
 	if u.Path == "" || u.Path == "/" {
+		if defaultPath == "" {
+			defaultPath = "/"
+		}
+		if !strings.HasPrefix(defaultPath, "/") {
+			defaultPath = "/" + defaultPath
+		}
 		u.Path = defaultPath
+		u.RawPath = ""
 	}
 	return u.String(), nil
 }

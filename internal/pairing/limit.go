@@ -32,6 +32,11 @@ func newLimiter() *Limiter {
 	return &Limiter{events: make(map[string]*series)}
 }
 
+// NewLimiter is an empty sliding-window limiter.
+func NewLimiter() *Limiter {
+	return newLimiter()
+}
+
 // AllowAll reports whether every rule still has room. On success it records
 // one event for each rule. On failure it records nothing.
 func (l *Limiter) AllowAll(now time.Time, rules ...Rule) bool {

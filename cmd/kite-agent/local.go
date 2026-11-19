@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -72,8 +71,9 @@ func runPair(args []string) error {
 		fmt.Fprintf(fs.Output(), "On the computer you connect from: kite connect CODE\n\n")
 		fmt.Fprintf(fs.Output(), "pair talks to the running agent over 127.0.0.1 when the control\n")
 		fmt.Fprintf(fs.Output(), "file is readable, so a second elevation prompt is not required.\n")
-		fmt.Fprintf(fs.Output(), "If the service is not reachable, pair uses REGISTRATION_KEY from\n")
-		fmt.Fprintf(fs.Output(), "the environment or the config file. The agent must be connected.\n\n")
+		fmt.Fprintf(fs.Output(), "If the service is not reachable, pair uses the registration key or\n")
+		fmt.Fprintf(fs.Output(), "agent token from the environment or the config file. The agent must\n")
+		fmt.Fprintf(fs.Output(), "be connected. An agent installed with --code pairs with its token.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -121,8 +121,9 @@ func runPair(args []string) error {
 	if loadErr != nil {
 		return fmt.Errorf("%s\n%s", pairHelp(last), loadErr)
 	}
-	if err := config.ValidateKey(cfg.RegistrationKey); err != nil {
-		return fmt.Errorf("%s\n%s", pairHelp(last), err)
+	secret, kind, credErr := cfg.Credential()
+	if credErr != nil {
+		return fmt.Errorf("%s\n%s", pairHelp(last), credErr)
 	}
 	base, err := pairing.HTTPBase(cfg.RelayAddr)
 	if err != nil {
@@ -138,13 +139,17 @@ func runPair(args []string) error {
 	if sshUser != "" && loadPath != "" {
 		_ = config.SetSSHUser(loadPath, sshUser)
 	}
-	resp, err := pairing.PostCreate(ctx, base, pairing.CreateRequest{
-		Key:        cfg.RegistrationKey,
+	req := pairing.CreateRequest{
+		Key:        secret,
 		Agent:      cfg.Name,
 		SSHUser:    sshUser,
 		ClientURL:  clientURL,
 		TTLSeconds: int(ttl.Seconds()),
-	})
+	}
+	if kind == "agent" {
+		req.Auth = "agent"
+	}
+	resp, err := pairing.PostCreate(ctx, base, req)
 	if err != nil {
 		return err
 	}
@@ -316,32 +321,7 @@ relay directly, which still requires the agent to be connected.`
 }
 
 func defaultSSHUser() string {
-	if v := strings.TrimSpace(os.Getenv("SUDO_USER")); v != "" {
-		v = leaf(v)
-		if v != "root" && !machineAccount(v) {
-			return v
-		}
-	}
-	u, err := user.Current()
-	if err != nil {
-		return ""
-	}
-	name := leaf(u.Username)
-	if name == "" || name == "root" || machineAccount(name) {
-		return ""
-	}
-	return name
-}
-
-func leaf(name string) string {
-	if i := strings.LastIndexAny(name, `\/`); i >= 0 {
-		return name[i+1:]
-	}
-	return name
-}
-
-func machineAccount(name string) bool {
-	return agent.IsMachineAccount(name)
+	return agent.InvokingUser()
 }
 
 func rememberSSHUser(serviceName, configPath string) {
