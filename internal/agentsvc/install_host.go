@@ -53,12 +53,21 @@ func unixLayout(name string) unixPaths {
 	}
 }
 
+// Preflight reports whether install can register the service. It does not
+// redeem an install code and does not change the machine.
+func Preflight(opt Options) error {
+	if os.Geteuid() == 0 {
+		return nil
+	}
+	return errors.New("kite-agent install needs root to register the service. The install code was not used. Re-run: " + sudoReRun())
+}
+
 // Install on Linux and macOS runs after SSH setup. Root writes the supervisor
 // files and starts the agent. Anyone else gets the exact manual commands.
 func Install(opt Options) error {
-	if os.Geteuid() != 0 {
+	if err := Preflight(opt); err != nil {
 		fmt.Fprint(os.Stdout, ManualInstallText(runtime.GOOS))
-		return errors.New("kite-agent install needs root to register the service; re-run with sudo, or follow the manual steps above")
+		return err
 	}
 	if err := rejectPlaceholderRelay(opt.Config.RelayAddr); err != nil {
 		return err
@@ -71,7 +80,9 @@ func Install(opt Options) error {
 	if err := os.MkdirAll(filepath.Dir(lay.env), 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(lay.state, 0o700); err != nil {
+	// 0711 so a named instance under /var/lib/kite-agent/<name> can be
+	// reached before a default instance has chmod'd the parent.
+	if err := agentctl.PrepareStateDir(lay.state); err != nil {
 		return err
 	}
 	if err := os.WriteFile(lay.env, []byte(body), 0o600); err != nil {

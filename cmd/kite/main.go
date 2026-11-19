@@ -13,6 +13,7 @@ import (
 	"github.com/zzzbug01/kite/internal/client"
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/process"
+	"github.com/zzzbug01/kite/internal/release"
 	"github.com/zzzbug01/kite/internal/version"
 )
 
@@ -20,6 +21,7 @@ func clientUsage() string {
 	return `Usage:
   kite [flags] <agent-name>
   kite connect [--relay URL] [--label name] <code>
+  kite upgrade [--version vX] [--check]
 
 OpenSSH ProxyCommand client. The agent name is the ssh Host alias (%n).
 "connect" is reserved and is not an agent name.
@@ -36,12 +38,17 @@ REGISTRATION_KEY still works for clients that have not paired.
 
 kite connect CODE redeems a one-time pairing code from kite-agent pair.
 The private key stays on this computer. Pass --relay the first time
-(wss://tunnel.example.com); later connects reuse the saved config.
+(a bare host, https://, or wss://tunnel.example.com); later connects
+reuse the saved config. kite upgrade downloads a release, checks
+SHA256SUMS, and replaces this binary.
 
 `
 }
 
 func main() {
+	if exe, err := os.Executable(); err == nil {
+		release.CleanupOld(exe)
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	if err := run(os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "kite: %s\n", err)
@@ -52,6 +59,9 @@ func main() {
 func run(args []string) error {
 	if len(args) > 0 && args[0] == "connect" {
 		return runConnect(args[1:])
+	}
+	if len(args) > 0 && args[0] == "upgrade" {
+		return runUpgrade(args[1:])
 	}
 	if len(args) > 0 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprint(os.Stderr, clientUsage())
@@ -65,7 +75,7 @@ func run(args []string) error {
 	fs.SetOutput(os.Stderr)
 	showVersion := fs.Bool("version", false, "print version and exit")
 	fs.String("config", "", "YAML config file (or KITE_CONFIG). Keep it gitignored; do not commit secrets")
-	fs.StringVar(&cfg.RelayAddr, "relay", cfg.RelayAddr, "relay WebSocket URL (env RELAY_ADDR), for example wss://tunnel.example.com/client")
+	fs.StringVar(&cfg.RelayAddr, "relay", cfg.RelayAddr, "relay address (env RELAY_ADDR): host, host:port, https://, or wss://tunnel.example.com/client")
 	fs.StringVar(&cfg.RegistrationKey, "registration-key", cfg.RegistrationKey, "shared registration key (env REGISTRATION_KEY)")
 	idle := fs.Duration("idle-timeout", cfg.IdleTimeout, "close after this long with no received frames (env IDLE_TIMEOUT)")
 	fs.Usage = func() {

@@ -28,7 +28,7 @@ func runConnect(args []string) error {
 	fs.SetOutput(os.Stderr)
 	configPath := config.PeekConfigFlag(args)
 	fs.StringVar(&configPath, "config", configPath, "client config file to write (default ~/.config/kite/config.yaml)")
-	relay := fs.String("relay", cfg.RelayAddr, "relay WebSocket URL (env RELAY_ADDR), for example wss://tunnel.example.com/client")
+	relay := fs.String("relay", cfg.RelayAddr, "relay address (env RELAY_ADDR): host, host:port, https://, or wss://tunnel.example.com/client")
 	label := fs.String("label", "", "name recorded on the key (default: this computer's hostname)")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: kite connect [--relay URL] [--label name] <code>\n\n")

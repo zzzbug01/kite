@@ -149,13 +149,17 @@ func (h controlHandler) Pair(ctx context.Context, ttl time.Duration, sshUser str
 	if ttl > 0 {
 		secs = int(ttl / time.Second)
 	}
-	resp, err := pairing.PostCreate(ctx, base, pairing.CreateRequest{
+	req := pairing.CreateRequest{
 		Key:        h.cfg.RegistrationKey,
 		Agent:      h.cfg.Name,
 		SSHUser:    sshUser,
 		ClientURL:  clientURL,
 		TTLSeconds: secs,
-	})
+	}
+	if h.cfg.Auth == "agent" {
+		req.Auth = "agent"
+	}
+	resp, err := pairing.PostCreate(ctx, base, req)
 	if err != nil {
 		return "", "", time.Time{}, err
 	}

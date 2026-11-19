@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -46,7 +47,7 @@ func Path(goos, home string, admin bool, programData string) (string, Kind) {
 		home = strings.TrimRight(home, `\/`)
 		return home + `\.ssh\authorized_keys`, KindWindowsUser
 	}
-	return filepath.Join(home, ".ssh", "authorized_keys"), KindPOSIX
+	return path.Join(home, ".ssh", "authorized_keys"), KindPOSIX
 }
 
 // Record is one key kite-agent installed.

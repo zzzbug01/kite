@@ -108,6 +108,32 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestInstallCodeSkipsRegistrationKey(t *testing.T) {
+	isolateConfigEnv(t)
+	t.Setenv("RELAY_ADDR", "")
+	t.Setenv("REGISTRATION_KEY", "")
+	t.Setenv("AGENT_TOKEN", "")
+	t.Setenv("AGENT_NAME", "")
+	t.Setenv("SSH_USER", "")
+	opt, err := ParseOptions([]string{"--relay", "tunnel.example.com", "--code", "ABCD-EFGH"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opt.Code != "ABCD-EFGH" {
+		t.Fatal(opt.Code)
+	}
+	if opt.Config.RelayAddr != "wss://tunnel.example.com/agent" {
+		t.Fatal(opt.Config.RelayAddr)
+	}
+	if opt.Config.Name == "" || opt.Config.Name == "connect" {
+		t.Fatal(opt.Config.Name)
+	}
+	t.Setenv("AGENT_NAME", "connect")
+	if _, err := ParseOptions([]string{"--relay", "tunnel.example.com", "--code", "ABCD-EFGH"}, true); err == nil {
+		t.Fatal("connect should be reserved")
+	}
+}
+
 func TestHelpHidesRegistrationKey(t *testing.T) {
 	isolateConfigEnv(t)
 	t.Setenv("RELAY_ADDR", "ws://127.0.0.1:8080/agent")
@@ -242,6 +268,44 @@ func TestFormatStatus(t *testing.T) {
 	}
 }
 
+func TestNewServiceNameIgnoresDefaultConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+	t.Setenv("KITE_CONFIG", "")
+	t.Setenv("AGENT_NAME", "")
+	t.Setenv("RELAY_ADDR", "")
+	t.Setenv("REGISTRATION_KEY", "")
+	t.Setenv("AGENT_TOKEN", "")
+	t.Setenv("LOCAL_SSH_ADDR", "")
+	cfgDir := filepath.Join(dir, ".config", "kite")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("agent:\n  name: my-win\n  relay_addr: wss://from-file.example/agent\n  local_ssh_addr: 127.0.0.1:2222\n  agent_token: kite_agent_secret\n")
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	def, err := ParseOptions([]string{"--code", "ABCD-EFGH", "--relay", "example.test"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Config.Name != "my-win" || def.Config.LocalSSHAddr != "127.0.0.1:2222" {
+		t.Fatalf("default instance did not read its config: %+v", def.Config)
+	}
+	other, err := ParseOptions([]string{"--service-name", "kite-agent-test", "--code", "ABCD-EFGH", "--relay", "example.test"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.Config.Name == "my-win" || other.Config.AgentToken == "kite_agent_secret" || other.Config.LocalSSHAddr == "127.0.0.1:2222" {
+		t.Fatalf("new instance inherited the default config: %+v", other.Config)
+	}
+	if other.ServiceName != "kite-agent-test" {
+		t.Fatalf("service %s", other.ServiceName)
+	}
+}
+
 func TestRejectPlaceholderAndProfile(t *testing.T) {
 	if err := rejectPlaceholderRelay("wss://tunnel.example.com/agent"); err == nil {
 		t.Fatal("expected placeholder rejection")
@@ -274,13 +338,27 @@ func TestControlPlaneOffWindows(t *testing.T) {
 	if err := Install(Options{}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "root") {
 		t.Fatalf("install: %v", err)
 	}
+	oldArgs := os.Args
+	os.Args = []string{"kite-agent", "install", "--relay", "wss://example.test/agent", "--code", "ABCD-EFGH", "--service-name", "kite-agent-test3"}
+	t.Cleanup(func() { os.Args = oldArgs })
+	hint := Preflight(Options{Code: "ABCD-EFGH", Config: config.Agent{RelayAddr: "wss://example.test/agent"}})
+	if hint == nil || !strings.Contains(hint.Error(), "--code ABCD-EFGH") || !strings.Contains(hint.Error(), "--service-name kite-agent-test3") || strings.Contains(hint.Error(), "REGISTRATION_KEY") {
+		t.Fatalf("preflight hint: %v", hint)
+	}
+	os.Args = []string{"kite-agent", "upgrade", "--service-name", "kite-agent-test3", "--version", "v0.1.0-rc.3"}
+	up := Upgrade(UpgradeOptions{From: "kite-agent", ServiceName: "kite-agent-test3", Version: "v0.1.0-rc.3"})
+	if up == nil || !strings.Contains(up.Error(), "--service-name kite-agent-test3") || !strings.Contains(up.Error(), "--version v0.1.0-rc.3") {
+		t.Fatalf("upgrade hint: %v", up)
+	}
+	if err := Uninstall(""); err == nil || !strings.Contains(err.Error(), "root") || !strings.Contains(err.Error(), "systemctl") {
+		t.Fatalf("uninstall: %v", err)
+	}
 	for name, err := range map[string]error{
-		"uninstall": Uninstall(""),
-		"start":     Start(""),
-		"stop":      Stop(""),
-		"restart":   Restart(""),
-		"service":   Serve("", nil),
-		"upgrade":   Upgrade(UpgradeOptions{From: "kite-agent.exe"}),
+		"start":   Start(""),
+		"stop":    Stop(""),
+		"restart": Restart(""),
+		"service": Serve("", nil),
+		"upgrade": Upgrade(UpgradeOptions{Apply: true, From: "kite-agent.exe"}),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "Windows") {
 			t.Fatalf("%s: %v", name, err)
@@ -377,10 +455,17 @@ func TestInstanceLayout(t *testing.T) {
 }
 
 func TestUpgradeCommand(t *testing.T) {
-	if _, err := ParseUpgrade(nil); err == nil {
-		t.Fatal("expected --from")
+	opt, err := ParseUpgrade(nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	opt, err := ParseUpgrade([]string{"--from", `D:\new\kite-agent.exe`, "--service-name", "kite-agent-test"})
+	if opt.From != "" || opt.Apply || opt.Check {
+		t.Fatalf("download upgrade: %+v", opt)
+	}
+	if _, err := ParseUpgrade([]string{"--apply"}); err == nil {
+		t.Fatal("expected --from with --apply")
+	}
+	opt, err = ParseUpgrade([]string{"--from", `D:\new\kite-agent.exe`, "--service-name", "kite-agent-test"})
 	if err != nil {
 		t.Fatal(err)
 	}

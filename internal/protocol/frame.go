@@ -37,6 +37,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -148,11 +149,13 @@ func Decode(b []byte) (Frame, error) {
 //
 // Agents send Role "agent" and Name. Clients send Role "client" and Agent
 // (the agent they want). Key is the shared registration secret, unless Auth
-// is "client", in which case Key is a per-client token from pairing.
+// is "client" (a per-client token from pairing) or "agent" (a per-agent
+// token from an install code).
 //
 // Auth and Features are optional. Peers from v0.1.0-rc.2 ignore unknown
 // JSON fields, so a new client still completes a legacy handshake when it
-// sends the shared registration key and leaves Auth empty.
+// sends the shared registration key and leaves Auth empty. An empty Auth
+// on an agent is still the registration key.
 type Hello struct {
 	Role     string   `json:"role"`
 	Key      string   `json:"key"`
@@ -160,6 +163,9 @@ type Hello struct {
 	Agent    string   `json:"agent,omitempty"`
 	Auth     string   `json:"auth,omitempty"`
 	Features []string `json:"features,omitempty"`
+	// KeyHash is set by the relay after it checks an agent token. It is not
+	// part of the wire format.
+	KeyHash string `json:"-"`
 }
 
 // PairInstall is the JSON payload of TypePairInstall.
@@ -223,4 +229,16 @@ func ValidName(s string) bool {
 		}
 	}
 	return true
+}
+
+// CheckAgentName rejects an empty name, whitespace, and the reserved name
+// "connect", which is the kite subcommand.
+func CheckAgentName(s string) error {
+	if strings.EqualFold(strings.TrimSpace(s), "connect") {
+		return errors.New(`agent name "connect" is reserved by the kite command`)
+	}
+	if !ValidName(s) {
+		return errors.New("agent name is invalid")
+	}
+	return nil
 }

@@ -142,6 +142,16 @@ func clip(s string) string {
 	return s
 }
 
+// Preflight reports whether this process can register the service.
+func Preflight(Options) error {
+	return requireAdmin()
+}
+
+// RequireUpgradePriv is the elevation check for a download-and-replace upgrade.
+func RequireUpgradePriv() error {
+	return requireAdmin()
+}
+
 // Install writes the service config, registers one instance, and starts it.
 func Install(opt Options) error {
 	if err := requireAdmin(); err != nil {
@@ -301,7 +311,7 @@ func Uninstall(name string) error {
 			cfg = lay.ConfigPath
 		}
 	}
-	fmt.Printf("The registration key was left on disk. Delete this file to remove it:\n  %s\n", cfg)
+	fmt.Printf("The config was left on disk (it may contain a registration key or an agent token). Delete this file to remove it:\n  %s\n", cfg)
 	if info.Binary != "" {
 		fmt.Printf("Left the binary in place: %s\n", info.Binary)
 	}

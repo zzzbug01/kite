@@ -12,12 +12,17 @@ import (
 // key cannot break out of its line.
 func AgentEnvFile(a config.Agent) (string, error) {
 	var b strings.Builder
-	b.WriteString("# kite-agent environment. Contains the registration key. Do not commit.\n")
+	b.WriteString("# kite-agent environment. Contains the registration key or agent token. Do not commit.\n")
 	rows := [][2]string{
 		{"RELAY_ADDR", a.RelayAddr},
-		{"REGISTRATION_KEY", a.RegistrationKey},
 		{"AGENT_NAME", a.Name},
 		{"LOCAL_SSH_ADDR", a.LocalSSHAddr},
+	}
+	if strings.TrimSpace(a.RegistrationKey) != "" {
+		rows = append(rows, [2]string{"REGISTRATION_KEY", a.RegistrationKey})
+	}
+	if strings.TrimSpace(a.AgentToken) != "" {
+		rows = append(rows, [2]string{"AGENT_TOKEN", a.AgentToken})
 	}
 	// Without this, LoadAgent treats LOCAL_SSH_ADDR as an explicit address
 	// and the running agent will not follow a moved sshd port.
@@ -27,6 +32,9 @@ func AgentEnvFile(a config.Agent) (string, error) {
 	rows = append(rows, [2]string{"IDLE_TIMEOUT", formatDuration(a.IdleTimeout)})
 	if strings.TrimSpace(a.SSHUser) != "" {
 		rows = append(rows, [2]string{"SSH_USER", a.SSHUser})
+	}
+	if strings.TrimSpace(a.ControlUser) != "" {
+		rows = append(rows, [2]string{"KITE_CONTROL_USER", a.ControlUser})
 	}
 	for _, row := range rows {
 		quoted, err := quoteEnv(row[1])

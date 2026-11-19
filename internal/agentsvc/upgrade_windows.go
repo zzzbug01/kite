@@ -84,6 +84,10 @@ func scheduleUpgrade(opt UpgradeOptions) error {
 	fmt.Printf("This session can disconnect when the tunnel restarts. The task still finishes.\n")
 	fmt.Printf("Result: %s\n", result)
 	os.Stdout.Sync()
+	before := int64(0)
+	if st, err := os.Stat(result); err == nil {
+		before = st.Size()
+	}
 	if err := schtasks("/Run", "/TN", task); err != nil {
 		_ = schtasks("/Delete", "/TN", task, "/F")
 		_ = os.Remove(xmlPath)
@@ -91,6 +95,12 @@ func scheduleUpgrade(opt UpgradeOptions) error {
 		return fmt.Errorf("start upgrade task: %w", err)
 	}
 	appendUpgradeLog(result, "upgrade task started: "+task)
+	// Wait for the task. A failed swap used to leave the service stopped
+	// while this command exited 0, and the installer then printed success.
+	if err := waitUpgradeResult(result, before, 60*time.Second); err != nil {
+		return err
+	}
+	removePrivateStage(from)
 	return nil
 }
 
@@ -164,14 +174,24 @@ func applyUpgrade(opt UpgradeOptions) error {
 		return err
 	}
 	note("copying " + from + " to " + dest)
-	if !samePath(from, dest) {
-		if err := copyFileRetry(dest, from); err != nil {
-			note("upgrade failed: " + err.Error())
-			_ = startAndWait(s, logPath)
-			return err
-		}
+	// Stopped above. Replace kite.exe and kite-agent.exe together. A failure
+	// puts the previous files back and starts the old binary.
+	var pairs [][2]string
+	kiteSrc := filepath.Join(filepath.Dir(from), "kite.exe")
+	kiteDst := filepath.Join(filepath.Dir(dest), "kite.exe")
+	if st, statErr := os.Stat(kiteSrc); statErr == nil && !st.IsDir() && !pathsEqual(kiteSrc, kiteDst) {
+		pairs = append(pairs, [2]string{kiteSrc, kiteDst})
 	}
-	copyOptionalSibling(from, filepath.Dir(dest), "kite.exe")
+	if !pathsEqual(from, dest) {
+		pairs = append(pairs, [2]string{from, dest})
+	}
+	cleanup, err := replaceFiles(pairs)
+	if err != nil {
+		note("upgrade failed: " + err.Error())
+		_ = startAndWait(s, logPath)
+		return err
+	}
+	cleanup()
 	note("starting " + name)
 	if err := startAndWait(s, logPath); err != nil {
 		note("upgrade failed: " + err.Error())

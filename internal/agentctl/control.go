@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -176,7 +177,7 @@ func newToken() (string, error) {
 }
 
 func writeEndpoint(path string, ep Endpoint) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := PrepareStateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	b, err := json.Marshal(ep)
@@ -199,7 +200,17 @@ func writeEndpoint(path string, ep Endpoint) error {
 			return err2
 		}
 	}
-	return os.Chmod(path, 0o600)
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	// KITE_CONTROL_USER is the person who ran install (SUDO_USER). The
+	// service rewrites this file as root; chown it back so pair works
+	// without another elevation prompt.
+	owner := strings.TrimSpace(os.Getenv("KITE_CONTROL_USER"))
+	if owner == "" {
+		owner = strings.TrimSpace(os.Getenv("SUDO_USER"))
+	}
+	return ShareControlFile(path, owner)
 }
 
 // Call reads the endpoint file and performs one operation.
@@ -310,6 +321,66 @@ func CandidatePaths(configFlag, serviceName string) []string {
 	return out
 }
 
+// PrepareStateDir creates dir. When dir is the kite-agent state root or a
+// named instance under it, every directory from /var/lib/kite-agent down is
+// mode 0711. MkdirAll(instance, 0700) would leave the parent unsearchable,
+// so `kite-agent pair --service-name` cannot traverse to the instance file
+// until a default install has chmod'd that parent.
+func PrepareStateDir(dir string) error {
+	return prepareStateDir(dir, "/var/lib/kite-agent")
+}
+
+func prepareStateDir(dir, root string) error {
+	perm := os.FileMode(0o700)
+	if runtime.GOOS != "windows" && stateUnder(dir, root) {
+		perm = 0o711
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	if perm == 0o711 {
+		return chmodFromRoot(root, dir)
+	}
+	return nil
+}
+
+func stateUnder(dir, root string) bool {
+	dir = filepath.Clean(dir)
+	root = filepath.Clean(root)
+	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
+}
+
+func chmodStateChain(dir string) error {
+	if stateUnder(dir, "/var/lib/kite-agent") {
+		return chmodFromRoot("/var/lib/kite-agent", dir)
+	}
+	return os.Chmod(dir, 0o711)
+}
+
+func chmodFromRoot(root, dir string) error {
+	root = filepath.Clean(root)
+	dir = filepath.Clean(dir)
+	if err := os.Chmod(root, 0o711); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if dir == root {
+		return nil
+	}
+	rest := strings.TrimPrefix(dir, root)
+	rest = strings.TrimPrefix(rest, string(filepath.Separator))
+	cur := root
+	for _, part := range strings.Split(rest, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		if err := os.Chmod(cur, 0o711); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // UnixStateDir is where one instance keeps its control file and SSH health.
 // The default instance uses /var/lib/kite-agent. Any other name is a subdirectory,
 // never the relay's /var/lib/kite.
@@ -317,19 +388,19 @@ func UnixStateDir(serviceName string) string {
 	dir := "/var/lib/kite-agent"
 	name := strings.TrimSpace(serviceName)
 	if name != "" && !strings.EqualFold(name, "kite-agent") {
-		dir = filepath.Join(dir, name)
+		dir = path.Join(dir, name)
 	}
 	return dir
 }
 
 // UnixControlPath is the instance control file.
 func UnixControlPath(serviceName string) string {
-	return filepath.Join(UnixStateDir(serviceName), "agent-control.json")
+	return path.Join(UnixStateDir(serviceName), "agent-control.json")
 }
 
 // UnixHealthPath is the instance local-SSH health file.
 func UnixHealthPath(serviceName string) string {
-	return filepath.Join(UnixStateDir(serviceName), "ssh-health.json")
+	return path.Join(UnixStateDir(serviceName), "ssh-health.json")
 }
 
 // UnixEnvFile is the env file install writes for this instance.
@@ -338,7 +409,7 @@ func UnixEnvFile(serviceName string) string {
 	if name == "" || strings.EqualFold(name, "kite-agent") {
 		return "/etc/kite/agent.env"
 	}
-	return filepath.Join("/etc/kite", name, "agent.env")
+	return path.Join("/etc/kite", name, "agent.env")
 }
 
 // UnixBinary is the installed executable. The default stays on PATH.
@@ -348,27 +419,29 @@ func UnixBinary(serviceName string) string {
 	if name == "" || strings.EqualFold(name, "kite-agent") {
 		return "/usr/local/bin/kite-agent"
 	}
-	return filepath.Join("/usr/local/lib/kite", name, "kite-agent")
+	return path.Join("/usr/local/lib/kite", name, "kite-agent")
 }
 
 // InstanceOfEnv reports the instance name stored in an install env path.
 // /etc/kite/agent.env is the default. /etc/kite/<name>/agent.env is that name.
-func InstanceOfEnv(path string) (string, bool) {
-	path = filepath.Clean(strings.TrimSpace(path))
-	if path == "" {
+func InstanceOfEnv(envPath string) (string, bool) {
+	// These are Unix paths written into unit files. path.Clean keeps the
+	// slashes when the test runs on Windows.
+	envPath = path.Clean(strings.TrimSpace(envPath))
+	if envPath == "" || envPath == "." {
 		return "", false
 	}
-	if path == "/etc/kite/agent.env" {
+	if envPath == "/etc/kite/agent.env" {
 		return "kite-agent", true
 	}
-	if filepath.Base(path) != "agent.env" {
+	if path.Base(envPath) != "agent.env" {
 		return "", false
 	}
-	dir := filepath.Dir(path)
-	if filepath.Dir(dir) != "/etc/kite" {
+	dir := path.Dir(envPath)
+	if path.Dir(dir) != "/etc/kite" {
 		return "", false
 	}
-	name := filepath.Base(dir)
+	name := path.Base(dir)
 	if name == "" || name == "kite-agent" || name == "." || name == ".." {
 		return "", false
 	}

@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 ExecStart=/usr/local/bin/kite-relay
 EnvironmentFile=/etc/kite/relay.env
-# Hashed client tokens. clients.json mode is 0600. The raw token is not stored.
+# Hashed client tokens (clients.json) and install codes / agent tokens
+# (install.json). Mode is 0600. Raw secrets are not stored.
 StateDirectory=kite
 Restart=on-failure
 RestartSec=3

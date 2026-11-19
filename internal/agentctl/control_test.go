@@ -156,6 +156,30 @@ func TestNamedInstanceControlPathComesFirst(t *testing.T) {
 	}
 }
 
+func TestPrepareStateDirParentIsTraversable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	root := filepath.Join(t.TempDir(), "kite-agent")
+	state := filepath.Join(root, "kite-agent-test3")
+	// MkdirAll with 0700 is what left the parent unsearchable.
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareStateDir(state, root); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{root, state} {
+		st, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o711 {
+			t.Fatalf("%s mode %o, want 0711", dir, st.Mode().Perm())
+		}
+	}
+}
+
 func TestRejectsNonLoopback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-control.json")
 	raw, err := json.Marshal(Endpoint{Addr: "203.0.113.10:9", Token: "secret"})

@@ -8,6 +8,7 @@ package sshaddr
 import (
 	"fmt"
 	"net"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -57,7 +58,7 @@ func load(fs FS, file string, seen map[string]struct{}, depth int) (Parsed, erro
 	}
 	var out Parsed
 	inMatch := false
-	dir := filepath.Dir(file)
+	dir := configDir(file)
 	for _, line := range strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n") {
 		line = stripComment(line)
 		fields := fields(line)
@@ -76,8 +77,8 @@ func load(fs FS, file string, seen map[string]struct{}, depth int) (Parsed, erro
 		case "include":
 			for _, pat := range fields[1:] {
 				pat = unquote(pat)
-				if !filepath.IsAbs(pat) {
-					pat = filepath.Join(dir, pat)
+				if !configAbs(pat) {
+					pat = configJoin(dir, pat)
 				}
 				matches, err := fs.Glob(pat)
 				if err != nil {
@@ -117,6 +118,34 @@ func load(fs FS, file string, seen map[string]struct{}, depth int) (Parsed, erro
 		}
 	}
 	return out, nil
+}
+
+// sshd_config paths keep their own slashes. A Unix absolute path stays
+// absolute when this parser runs on Windows, and a Windows path still uses
+// the host separator.
+func configDir(file string) string {
+	if slashPath(file) {
+		return path.Dir(file)
+	}
+	return filepath.Dir(file)
+}
+
+func configAbs(p string) bool {
+	if strings.HasPrefix(p, "/") {
+		return true
+	}
+	return filepath.IsAbs(p)
+}
+
+func configJoin(dir, elem string) string {
+	if slashPath(dir) || slashPath(elem) || strings.HasPrefix(elem, "/") {
+		return path.Join(dir, elem)
+	}
+	return filepath.Join(dir, elem)
+}
+
+func slashPath(p string) bool {
+	return strings.Contains(p, "/") && !strings.Contains(p, `\`)
 }
 
 func stripComment(line string) string {

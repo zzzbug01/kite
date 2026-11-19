@@ -92,22 +92,29 @@ func TestValidateKey(t *testing.T) {
 }
 
 func TestNormalizeRelayURL(t *testing.T) {
-	got, err := NormalizeRelayURL("wss://tunnel.example.com", "/agent")
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		in, path, want string
+	}{
+		{"wss://tunnel.example.com", "/agent", "wss://tunnel.example.com/agent"},
+		{"ws://127.0.0.1:8080/agent", "/client", "ws://127.0.0.1:8080/agent"},
+		{"tunnel.example.com", "/agent", "wss://tunnel.example.com/agent"},
+		{"tunnel.example.com:8443", "/client", "wss://tunnel.example.com:8443/client"},
+		{"https://tunnel.example.com", "/agent", "wss://tunnel.example.com/agent"},
+		{"https://tunnel.example.com/custom", "/agent", "wss://tunnel.example.com/custom"},
+		{"http://127.0.0.1:8080", "/client", "ws://127.0.0.1:8080/client"},
+		{"wss://tunnel.example.com/agent", "/client", "wss://tunnel.example.com/agent"},
 	}
-	if got != "wss://tunnel.example.com/agent" {
-		t.Fatalf("%s", got)
+	for _, tc := range cases {
+		got, err := NormalizeRelayURL(tc.in, tc.path)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s: got %s want %s", tc.in, got, tc.want)
+		}
 	}
-	got, err = NormalizeRelayURL("ws://127.0.0.1:8080/agent", "/client")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "ws://127.0.0.1:8080/agent" {
-		t.Fatalf("%s", got)
-	}
-	if _, err := NormalizeRelayURL("https://tunnel.example.com", "/agent"); err == nil {
-		t.Fatal("https should be rejected")
+	if _, err := NormalizeRelayURL("ftp://tunnel.example.com", "/agent"); err == nil {
+		t.Fatal("ftp should be rejected")
 	}
 }
 

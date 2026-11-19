@@ -17,7 +17,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -167,11 +169,12 @@ func waitNoAgent(t *testing.T, srv *relay.Server, name string) {
 
 func dial(t *testing.T, base, name string) *client.Stream {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 	var st *client.Stream
 	var err error
-	deadline := time.Now().Add(5 * time.Second)
+	// -race on a slow runner can leave a gap after an agent is replaced.
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		st, err = client.Dial(ctx, client.Config{
 			RelayURL:        base + "/client",
@@ -185,7 +188,7 @@ func dial(t *testing.T, base, name string) *client.Stream {
 			t.Cleanup(func() { st.Close() })
 			return st
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(deadline) || ctx.Err() != nil {
 			t.Fatalf("dial %s: %v", name, err)
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -406,8 +409,10 @@ func TestReplaceAgent(t *testing.T) {
 
 	ctxB, cancelB := context.WithCancel(context.Background())
 	defer cancelB()
+	// Run reconnects. DialAndServe would stay gone if the first socket
+	// dropped during the handoff, which -race on macOS has done.
 	go func() {
-		_ = agent.DialAndServe(ctxB, agent.Config{
+		_ = agent.Run(ctxB, agent.Config{
 			RelayURL:        base + "/agent",
 			RegistrationKey: "test-key",
 			Name:            "pc",
@@ -420,7 +425,7 @@ func TestReplaceAgent(t *testing.T) {
 
 	select {
 	case <-doneA:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("old agent was not replaced")
 	}
 	waitAgent(t, srv, "pc")
@@ -628,6 +633,18 @@ func TestPairingAndClientToken(t *testing.T) {
 	home := t.TempDir()
 	local := startEcho(t)
 	admin := false
+	sshUser := "tester"
+	if runtime.GOOS == "windows" {
+		// icacls rejects an account that does not exist on this machine.
+		u, err := user.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sshUser = u.Username
+		if i := strings.LastIndexAny(sshUser, `\/`); i >= 0 {
+			sshUser = sshUser[i+1:]
+		}
+	}
 	go func() {
 		_ = agent.Run(ctx, agent.Config{
 			RelayURL:        base + "/agent",
@@ -637,7 +654,7 @@ func TestPairingAndClientToken(t *testing.T) {
 			IdleTimeout:     time.Hour,
 			PingInterval:    time.Hour,
 			Logger:          discard(),
-			SSHUser:         "tester",
+			SSHUser:         sshUser,
 			HomeDir:         home,
 			SSHAdmin:        &admin,
 		})
@@ -648,7 +665,7 @@ func TestPairingAndClientToken(t *testing.T) {
 	created, err := pairing.PostCreate(ctx, httpBase, pairing.CreateRequest{
 		Key:       "test-key",
 		Agent:     "pc",
-		SSHUser:   "tester",
+		SSHUser:   sshUser,
 		ClientURL: base + "/client",
 	})
 	if err != nil {
@@ -692,7 +709,7 @@ func TestPairingAndClientToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if redeemed.Agent != "pc" || redeemed.SSHUser != "tester" || !strings.HasPrefix(redeemed.ClientToken, "kite_") {
+	if redeemed.Agent != "pc" || redeemed.SSHUser != sshUser || !strings.HasPrefix(redeemed.ClientToken, "kite_") {
 		t.Fatalf("%+v", redeemed)
 	}
 	if _, err := pairing.PostRedeem(ctx, httpBase, pairing.RedeemRequest{

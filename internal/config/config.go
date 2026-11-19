@@ -22,6 +22,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzzbug01/kite/internal/protocol"
+	"github.com/zzzbug01/kite/internal/windir"
 )
 
 // PlaceholderKey is the example secret shipped in sample configs.
@@ -51,11 +52,14 @@ type RelaySection struct {
 type AgentSection struct {
 	RelayAddr       string `yaml:"relay_addr"`
 	RegistrationKey string `yaml:"registration_key"`
-	Name            string `yaml:"name"`
-	LocalSSHAddr    string `yaml:"local_ssh_addr"`
-	LocalSSHAuto    bool   `yaml:"local_ssh_addr_auto"`
-	IdleTimeout     string `yaml:"idle_timeout"`
-	SSHUser         string `yaml:"ssh_user"`
+	// AgentToken is a per-agent secret from kite-relay invite. It replaces
+	// the registration key for agents installed with a one-time code.
+	AgentToken   string `yaml:"agent_token,omitempty"`
+	Name         string `yaml:"name"`
+	LocalSSHAddr string `yaml:"local_ssh_addr"`
+	LocalSSHAuto bool   `yaml:"local_ssh_addr_auto"`
+	IdleTimeout  string `yaml:"idle_timeout"`
+	SSHUser      string `yaml:"ssh_user"`
 }
 
 // ClientSection is the kite client portion of a config file.
@@ -91,8 +95,23 @@ type Relay struct {
 type Agent struct {
 	RelayAddr       string
 	RegistrationKey string
-	Name            string
-	LocalSSHAddr    string
+	// AgentToken is set when this agent was installed with a one-time code.
+	// The relay stores only a hash of it, bound to Name.
+	AgentToken string
+	// TokenFromFile is true when the config file holds an agent token.
+	// RELAY_ADDR and REGISTRATION_KEY from the environment do not override
+	// that install. An explicit --registration-key flag still can.
+	TokenFromFile bool
+	// KeyFromFlag is set by the command when --registration-key was passed.
+	KeyFromFlag bool
+	// NameFromEnv is true when AGENT_NAME was set, so install --code must
+	// match a name bound to the code instead of adopting it.
+	NameFromEnv bool
+	Name        string
+	// ControlUser is the person who should be able to run kite-agent pair
+	// without a further sudo. Install writes it as KITE_CONTROL_USER.
+	ControlUser  string
+	LocalSSHAddr string
 	// LocalSSHAuto is true when kite chose LocalSSHAddr by inspecting sshd.
 	// An explicit --local, LOCAL_SSH_ADDR without LOCAL_SSH_ADDR_AUTO, or a
 	// config value without the auto flag clears it.
@@ -116,7 +135,7 @@ type Client struct {
 
 // LoadRelay resolves relay settings. explicitPath, when non-empty, must exist.
 func LoadRelay(explicitPath string) (Relay, error) {
-	file, err := loadFile(explicitPath)
+	file, err := loadFile(explicitPath, true)
 	if err != nil {
 		return Relay{}, err
 	}
@@ -176,7 +195,18 @@ func LoadRelay(explicitPath string) (Relay, error) {
 
 // LoadAgent resolves agent settings.
 func LoadAgent(explicitPath string) (Agent, error) {
-	file, err := loadFile(explicitPath)
+	return loadAgent(explicitPath, true)
+}
+
+// LoadAgentIsolated resolves agent settings without discovering another
+// instance's config. A new --service-name install uses this so it does not
+// inherit the default machine's name and SSH address.
+func LoadAgentIsolated(explicitPath string) (Agent, error) {
+	return loadAgent(explicitPath, false)
+}
+
+func loadAgent(explicitPath string, discover bool) (Agent, error) {
+	file, err := loadFile(explicitPath, discover)
 	if err != nil {
 		return Agent{}, err
 	}
@@ -185,6 +215,8 @@ func LoadAgent(explicitPath string) (Agent, error) {
 		IdleTimeout:     protocol.DefaultIdleTimeout,
 		RelayAddr:       file.Agent.RelayAddr,
 		RegistrationKey: file.Agent.RegistrationKey,
+		AgentToken:      file.Agent.AgentToken,
+		TokenFromFile:   strings.TrimSpace(file.Agent.AgentToken) != "",
 		Name:            file.Agent.Name,
 		SSHUser:         file.Agent.SSHUser,
 	}
@@ -201,13 +233,17 @@ func LoadAgent(explicitPath string) (Agent, error) {
 	} else if d > 0 {
 		cfg.IdleTimeout = d
 	}
-	if v := os.Getenv("RELAY_ADDR"); v != "" {
+	if v := os.Getenv("RELAY_ADDR"); v != "" && !cfg.TokenFromFile {
 		cfg.RelayAddr = v
 	}
-	if v := os.Getenv("REGISTRATION_KEY"); v != "" {
+	if v := os.Getenv("REGISTRATION_KEY"); v != "" && !cfg.TokenFromFile {
 		cfg.RegistrationKey = v
 	}
+	if v := os.Getenv("AGENT_TOKEN"); v != "" {
+		cfg.AgentToken = v
+	}
 	if v := os.Getenv("AGENT_NAME"); v != "" {
+		cfg.NameFromEnv = true
 		cfg.Name = v
 	}
 	if v := os.Getenv("LOCAL_SSH_ADDR"); v != "" {
@@ -237,7 +273,7 @@ func LoadAgent(explicitPath string) (Agent, error) {
 
 // LoadClient resolves client settings.
 func LoadClient(explicitPath string) (Client, error) {
-	file, err := loadFile(explicitPath)
+	file, err := loadFile(explicitPath, true)
 	if err != nil {
 		return Client{}, err
 	}
@@ -580,13 +616,33 @@ func writePrivate(path string, data []byte) error {
 
 func defaultStateDir() string {
 	if runtime.GOOS == "windows" {
-		root := strings.TrimSpace(os.Getenv("ProgramData"))
-		if root == "" {
-			root = `C:\ProgramData`
-		}
-		return filepath.Join(root, "kite", "state")
+		return filepath.Join(windir.ProgramData(), "kite", "state")
 	}
 	return "/var/lib/kite"
+}
+
+// Credential is the secret this agent presents to the relay.
+// A token stored in the config file wins over REGISTRATION_KEY and
+// RELAY_ADDR from the environment. --registration-key still overrides.
+// An install that used a one-time code stores only the token.
+func (a Agent) Credential() (secret, kind string, err error) {
+	key := strings.TrimSpace(a.RegistrationKey)
+	token := strings.TrimSpace(a.AgentToken)
+	// A token stored in the config wins over a registration key that arrived
+	// from the environment. --registration-key still overrides.
+	if token != "" && a.TokenFromFile && !a.KeyFromFlag {
+		return token, "agent", nil
+	}
+	if key != "" && key != PlaceholderKey {
+		return key, "registration", nil
+	}
+	if token != "" {
+		return token, "agent", nil
+	}
+	if key == PlaceholderKey {
+		return "", "", errors.New("REGISTRATION_KEY is still the example placeholder CHANGE_ME; set a real secret or install with --code from kite-relay invite")
+	}
+	return "", "", errors.New("REGISTRATION_KEY or an agent token is required; set the key, or install with --code from kite-relay invite")
 }
 
 // ValidateKey rejects an empty key and the published example placeholder.
@@ -600,26 +656,52 @@ func ValidateKey(key string) error {
 	return nil
 }
 
-// NormalizeRelayURL checks a ws:// or wss:// URL and fills defaultPath when
-// the URL has no path of its own.
-func NormalizeRelayURL(raw, defaultPath string) (string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return "", errors.New("RELAY_ADDR is required (for example wss://tunnel.example.com/agent)")
+// ParseRelayURL accepts a bare host, host:port, http(s)://, or ws(s):// URL,
+// with or without a path. https becomes wss and http becomes ws. A missing
+// scheme defaults to wss. The path is left as the caller wrote it.
+func ParseRelayURL(raw string) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("RELAY_ADDR is required (for example wss://tunnel.example.com/agent)")
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "wss://" + raw
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("RELAY_ADDR: %w", err)
+		return nil, fmt.Errorf("RELAY_ADDR: %w", err)
 	}
-	switch u.Scheme {
-	case "ws", "wss":
+	switch strings.ToLower(u.Scheme) {
+	case "wss", "https":
+		u.Scheme = "wss"
+	case "ws", "http":
+		u.Scheme = "ws"
 	default:
-		return "", fmt.Errorf("RELAY_ADDR must use ws:// or wss://, got %q", u.Scheme)
+		return nil, fmt.Errorf("RELAY_ADDR must be a host or an http(s)/ws(s) URL, got %q", u.Scheme)
 	}
 	if u.Host == "" {
-		return "", errors.New("RELAY_ADDR is missing a host")
+		return nil, errors.New("RELAY_ADDR is missing a host")
+	}
+	u.Fragment = ""
+	return u, nil
+}
+
+// NormalizeRelayURL checks a relay address and fills defaultPath when the
+// URL has no path of its own. Full ws:// and wss:// URLs keep an explicit path.
+func NormalizeRelayURL(raw, defaultPath string) (string, error) {
+	u, err := ParseRelayURL(raw)
+	if err != nil {
+		return "", err
 	}
 	if u.Path == "" || u.Path == "/" {
+		if defaultPath == "" {
+			defaultPath = "/"
+		}
+		if !strings.HasPrefix(defaultPath, "/") {
+			defaultPath = "/" + defaultPath
+		}
 		u.Path = defaultPath
+		u.RawPath = ""
 	}
 	return u.String(), nil
 }
@@ -647,17 +729,20 @@ func PeekConfigFlag(args []string) string {
 	return ""
 }
 
-func loadFile(explicit string) (File, error) {
+func loadFile(explicit string, discover bool) (File, error) {
 	path := explicit
 	if path == "" {
 		path = os.Getenv("KITE_CONFIG")
 	}
 	mustExist := path != ""
-	if path == "" {
+	if path == "" && discover {
 		path = discoverConfig()
 		if path == "" {
 			return File{}, nil
 		}
+	}
+	if path == "" {
+		return File{}, nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -681,11 +766,7 @@ func WindowsMachineConfig() string {
 	if runtime.GOOS != "windows" {
 		return ""
 	}
-	root := strings.TrimSpace(os.Getenv("ProgramData"))
-	if root == "" {
-		root = `C:\ProgramData`
-	}
-	return filepath.Join(root, "kite", "config.yaml")
+	return filepath.Join(windir.ProgramData(), "kite", "config.yaml")
 }
 
 // discoverConfig finds a config outside the git working tree.

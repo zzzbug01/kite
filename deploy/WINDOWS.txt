@@ -1,6 +1,20 @@
 kite on Windows
 ================
 
+The usual install is one command, not this zip. From PowerShell:
+
+    irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex
+    kite connect --relay tunnel.example.com ABCD-EFGH
+
+A controlled machine, after kite-relay invite on the server (the script
+relaunches elevated):
+
+    $env:KITE_AGENT='1'; $env:KITE_RELAY='tunnel.example.com'; $env:KITE_CODE='ABCD-EFGH'; irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex
+    kite-agent pair
+
+Upgrade the client with `kite upgrade`, or the agent with `kite-agent upgrade`.
+`--from` is only for a binary you already have.
+
 From an elevated PowerShell (Run as administrator), in this directory.
 Replace CHANGE_ME and tunnel.example.com before running. install refuses
 those placeholders.
@@ -90,6 +104,19 @@ system LaunchDaemon. Neither file is in this zip.
 
 中文
 ====
+
+常用安装是一条命令，不是这个压缩包。在 PowerShell 里：
+
+    irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex
+    kite connect --relay tunnel.example.com ABCD-EFGH
+
+被控电脑：先在服务器上 kite-relay invite，然后（脚本会要求提升权限）：
+
+    $env:KITE_AGENT='1'; $env:KITE_RELAY='tunnel.example.com'; $env:KITE_CODE='ABCD-EFGH'; irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex
+    kite-agent pair
+
+升级客户端用 `kite upgrade`，升级 agent 用 `kite-agent upgrade`。
+只有手里已经有新程序时才需要 `--from`。
 
 在本目录用提升权限的 PowerShell（以管理员身份运行）。运行前换掉 CHANGE_ME
 和 tunnel.example.com。install 会拒绝这两个占位符。

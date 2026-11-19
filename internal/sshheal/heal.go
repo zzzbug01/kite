@@ -163,18 +163,9 @@ func (h *Healer) Recover(ctx context.Context, dialErr error) (retry bool) {
 	if err != nil {
 		h.log.Info("local ssh: could not query sshd", "err", err)
 	}
-	started := false
-	if !running {
-		h.log.Info("local ssh: sshd stopped", "addr", current)
-		h.record(Health{Status: "sshd_stopped", Addr: current, At: now})
-		if err := h.sys.Start(ctx); err != nil {
-			h.log.Info("local ssh: start sshd failed", "err", err)
-			h.record(Health{Status: "failed", Addr: current, Detail: err.Error(), At: h.now()})
-		} else {
-			started = true
-			h.log.Info("local ssh: started by kite", "addr", current)
-		}
-	}
+	// A moved sshd port looks like "not running" on the old address. Detect
+	// the new listener before trying to start sshd, so macOS does not log
+	// "sshd stopped" and "start failed: not root" for a port change.
 	if auto {
 		detected, derr := h.sys.Detect(ctx)
 		if derr != nil {
@@ -196,6 +187,18 @@ func (h *Healer) Recover(ctx context.Context, dialErr error) (retry bool) {
 			}
 			h.record(Health{Status: "port_changed", From: current, Addr: detected, At: h.now()})
 			return true
+		}
+	}
+	started := false
+	if !running {
+		h.log.Info("local ssh: sshd stopped", "addr", current)
+		h.record(Health{Status: "sshd_stopped", Addr: current, At: now})
+		if err := h.sys.Start(ctx); err != nil {
+			h.log.Info("local ssh: start sshd failed", "err", err)
+			h.record(Health{Status: "failed", Addr: current, Detail: err.Error(), At: h.now()})
+		} else {
+			started = true
+			h.log.Info("local ssh: started by kite", "addr", current)
 		}
 	}
 	if started {

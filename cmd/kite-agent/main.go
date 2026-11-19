@@ -10,13 +10,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/zzzbug01/kite/internal/agent"
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/config"
+	"github.com/zzzbug01/kite/internal/invite"
 	"github.com/zzzbug01/kite/internal/process"
+	"github.com/zzzbug01/kite/internal/release"
 	"github.com/zzzbug01/kite/internal/sshaddr"
 	"github.com/zzzbug01/kite/internal/sshheal"
 	"github.com/zzzbug01/kite/internal/sshsetup"
@@ -24,6 +28,9 @@ import (
 )
 
 func main() {
+	if exe, err := os.Executable(); err == nil {
+		release.CleanupOld(exe)
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	if err := run(os.Args[1:]); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, flag.ErrHelp) {
 		fmt.Fprintf(os.Stderr, "kite-agent: %s\n", err)
@@ -53,6 +60,12 @@ func run(args []string) error {
 	case agentsvc.CmdInstall:
 		opt, done, err := ready(rest, true)
 		if done || err != nil {
+			return err
+		}
+		if u := defaultSSHUser(); u != "" {
+			opt.Config.ControlUser = u
+		}
+		if err := agentsvc.Preflight(opt); err != nil {
 			return err
 		}
 		if !opt.SkipSSHSetup {
@@ -87,7 +100,36 @@ func run(args []string) error {
 		} else {
 			fmt.Fprintf(os.Stdout, "local ssh: %s (configured)\n", opt.Config.LocalSSHAddr)
 		}
-		return agentsvc.Install(opt)
+		var redeemedToken, redeemedName string
+		if opt.Code != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			token, name, redeemErr := invite.Redeem(ctx, opt.Config.RelayAddr, opt.Code, opt.Config.Name, opt.NameExplicit)
+			cancel()
+			if redeemErr != nil {
+				return redeemErr
+			}
+			opt.Config.AgentToken = token
+			opt.Config.RegistrationKey = ""
+			opt.Config.TokenFromFile = true
+			if name != "" {
+				opt.Config.Name = name
+			}
+			redeemedToken, redeemedName = token, opt.Config.Name
+			fmt.Fprintf(os.Stdout, "install code accepted for %s\n", opt.Config.Name)
+		}
+		if err := agentsvc.Install(opt); err != nil {
+			if redeemedToken != "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if revErr := invite.RevokeToken(ctx, opt.Config.RelayAddr, redeemedToken, redeemedName); revErr != nil {
+					fmt.Fprintf(os.Stderr, "kite-agent: could not revoke the unused agent token: %s\n", revErr)
+				} else {
+					fmt.Fprintln(os.Stderr, "kite-agent: revoked the agent token because install did not finish")
+				}
+				cancel()
+			}
+			return err
+		}
+		return nil
 	case agentsvc.CmdPair:
 		return runPair(rest)
 	case agentsvc.CmdUnpair:
@@ -121,6 +163,10 @@ func run(args []string) error {
 		if done || err != nil {
 			return err
 		}
+		ver := instanceBinaryVersion(name)
+		if ver == "" {
+			ver = "unknown"
+		}
 		var text string
 		if runtime.GOOS == "windows" {
 			var err error
@@ -128,8 +174,9 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
+			text = "Version: " + ver + "\n" + text
 		} else {
-			text = "Instance: " + name + "\nStart and stop this instance with systemctl on Linux or launchctl on macOS.\n"
+			text = "Instance: " + name + "\nVersion: " + ver + "\nStart and stop this instance with systemctl on Linux or launchctl on macOS.\n"
 		}
 		paths := agentsvc.StatusHealthPaths(name, cfgPath)
 		fmt.Fprint(os.Stdout, text)
@@ -155,6 +202,49 @@ func run(args []string) error {
 		}
 		if err != nil {
 			return err
+		}
+		if !opt.Apply && opt.From == "" {
+			if !opt.Check {
+				if err := agentsvc.RequireUpgradePriv(); err != nil {
+					return err
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			current := instanceBinaryVersion(opt.ServiceName)
+			fetched, err := fetchRelease(ctx, "kite-agent", opt.Version, current, opt.Check)
+			if err != nil {
+				return err
+			}
+			if fetched.done {
+				return nil
+			}
+			if err := guardTokenDowngrade(opt, fetched.tag); err != nil {
+				os.RemoveAll(filepath.Dir(fetched.path))
+				return err
+			}
+			stage := filepath.Dir(fetched.path)
+			if runtime.GOOS != "windows" {
+				defer os.RemoveAll(stage)
+			}
+			opt.From = fetched.path
+			rememberSSHUser(opt.ServiceName, "")
+			err = agentsvc.Upgrade(opt)
+			// On Windows the scheduled task copies this file. scheduleUpgrade
+			// waits for that result and deletes the stage. If the task never
+			// started, delete it here.
+			if runtime.GOOS == "windows" && err != nil {
+				os.RemoveAll(stage)
+			}
+			return err
+		}
+		if !opt.Apply && opt.From != "" {
+			// --from is how install.ps1 swaps a running service, including a
+			// downgrade to a binary that does not know about agent tokens.
+			// Check before that binary is asked to stop the service.
+			if err := guardTokenDowngrade(opt, targetTag(opt)); err != nil {
+				return err
+			}
 		}
 		rememberSSHUser(opt.ServiceName, "")
 		return agentsvc.Upgrade(opt)
@@ -275,9 +365,14 @@ func runService(args []string) error {
 }
 
 func runAgent(ctx context.Context, opt agentsvc.Options) error {
+	secret, kind, err := opt.Config.Credential()
+	if err != nil {
+		return err
+	}
 	return agent.Run(ctx, agent.Config{
 		RelayURL:        opt.Config.RelayAddr,
-		RegistrationKey: opt.Config.RegistrationKey,
+		RegistrationKey: secret,
+		Auth:            kind,
 		Name:            opt.Config.Name,
 		LocalSSHAddr:    opt.Config.LocalSSHAddr,
 		IdleTimeout:     opt.Config.IdleTimeout,

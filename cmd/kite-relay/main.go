@@ -26,8 +26,15 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && args[0] == "tokens" {
-		return runTokens(args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case "tokens":
+			return runTokens(args[1:])
+		case "invite":
+			return runInvite(args[1:])
+		case "agents":
+			return runAgents(args[1:])
+		}
 	}
 	cfg, err := config.LoadRelay(config.PeekConfigFlag(args))
 	if err != nil {
@@ -50,11 +57,20 @@ func run(args []string) error {
 		fmt.Fprintf(fs.Output(), "Listens for kite agents and clients. Default is plain WebSocket on 127.0.0.1:8080\n")
 		fmt.Fprintf(fs.Output(), "for nginx or Caddy to terminate TLS. Set REGISTRATION_KEY in the environment\n")
 		fmt.Fprintf(fs.Output(), "or a gitignored config file. Never commit it.\n\n")
+		fmt.Fprintf(fs.Output(), "  kite-relay invite [--ttl 1h] [--name agent]\n")
+		fmt.Fprintf(fs.Output(), "  kite-relay agents list\n")
+		fmt.Fprintf(fs.Output(), "  kite-relay agents revoke <name-or-id>\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay tokens list\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay tokens revoke <id-or-label>\n\n")
+		fmt.Fprintf(fs.Output(), "invite writes a one-time install code into STATE_DIR/install.json\n")
+		fmt.Fprintf(fs.Output(), "(only a hash). The running relay redeems it from that file, and the\n")
+		fmt.Fprintf(fs.Output(), "code is still there after a restart. Default lifetime is 1h, maximum 24h.\n")
+		fmt.Fprintf(fs.Output(), "Redeeming issues an agent token, also stored as a hash, bound to the\n")
+		fmt.Fprintf(fs.Output(), "agent name. agents list and agents revoke manage those tokens.\n\n")
 		fmt.Fprintf(fs.Output(), "Client tokens issued by kite connect are stored as hashes in STATE_DIR\n")
 		fmt.Fprintf(fs.Output(), "(default /var/lib/kite). REGISTRATION_KEY_PREVIOUS is accepted during\n")
-		fmt.Fprintf(fs.Output(), "a key rotation so agents can move one at a time.\n\n")
+		fmt.Fprintf(fs.Output(), "a key rotation so agents can move one at a time. Agents may also\n")
+		fmt.Fprintf(fs.Output(), "authenticate with an agent token from invite.\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
