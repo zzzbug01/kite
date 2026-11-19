@@ -135,7 +135,7 @@ func postJSON(ctx context.Context, endpoint string, body any, dest any) error {
 		return err
 	}
 	if resp.StatusCode == http.StatusNotFound {
-		return &APIError{Status: resp.StatusCode, Message: "this relay does not support pairing; upgrade kite-relay"}
+		return &APIError{Status: resp.StatusCode, Message: fmt.Sprintf("pairing request to %s returned 404. The relay may be old and not support pairing, or this address may be wrong", endpoint)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var er struct {

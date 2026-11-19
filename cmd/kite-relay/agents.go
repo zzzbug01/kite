@@ -13,7 +13,7 @@ import (
 
 func runAgents(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: kite-relay agents list | kite-relay agents revoke <name>")
+		return errors.New("usage: kite-relay agents list | kite-relay agents revoke <name-or-id>")
 	}
 	switch args[0] {
 	case "list":
@@ -29,7 +29,7 @@ func runAgents(args []string) error {
 		}
 		return err
 	case "-h", "--help", "help":
-		fmt.Fprint(os.Stderr, "Usage: kite-relay agents list [--state-dir dir]\n       kite-relay agents revoke [--state-dir dir] <name>\n\nAgent tokens are the hashes in STATE_DIR/install.json issued by install codes.\nRevoking one does not remove that machine's SSH keys or client tokens.\n")
+		fmt.Fprint(os.Stderr, "Usage: kite-relay agents list [--state-dir dir]\n       kite-relay agents revoke [--state-dir dir] <name-or-id>\n\nAgent tokens are the hashes in STATE_DIR/install.json issued by install codes.\nrevoke accepts the NAME or the ID column from agents list.\nRevoking one does not remove that machine's SSH keys or client tokens.\n")
 		return nil
 	default:
 		return fmt.Errorf("unknown agents command %q", args[0])
@@ -63,7 +63,7 @@ func agentsRevoke(args []string) error {
 		return err
 	}
 	if len(rest) != 1 {
-		return errors.New("usage: kite-relay agents revoke <name>")
+		return errors.New("usage: kite-relay agents revoke <name-or-id>")
 	}
 	rec, err := invite.Open(dir).Revoke(rest[0])
 	if err != nil {

@@ -163,6 +163,10 @@ func run(args []string) error {
 		if done || err != nil {
 			return err
 		}
+		ver := instanceBinaryVersion(name)
+		if ver == "" {
+			ver = "unknown"
+		}
 		var text string
 		if runtime.GOOS == "windows" {
 			var err error
@@ -170,8 +174,9 @@ func run(args []string) error {
 			if err != nil {
 				return err
 			}
+			text = "Version: " + ver + "\n" + text
 		} else {
-			text = "Instance: " + name + "\nStart and stop this instance with systemctl on Linux or launchctl on macOS.\n"
+			text = "Instance: " + name + "\nVersion: " + ver + "\nStart and stop this instance with systemctl on Linux or launchctl on macOS.\n"
 		}
 		paths := agentsvc.StatusHealthPaths(name, cfgPath)
 		fmt.Fprint(os.Stdout, text)
@@ -206,7 +211,8 @@ func run(args []string) error {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			fetched, err := fetchRelease(ctx, "kite-agent", opt.Version, opt.Check)
+			current := instanceBinaryVersion(opt.ServiceName)
+			fetched, err := fetchRelease(ctx, "kite-agent", opt.Version, current, opt.Check)
 			if err != nil {
 				return err
 			}

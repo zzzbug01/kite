@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -21,8 +22,11 @@ type fetchedBinary struct {
 	done bool
 }
 
-func fetchRelease(ctx context.Context, command, ver string, check bool) (fetchedBinary, error) {
-	got, err := release.Prepare(ctx, command, ver, version.Version, check)
+func fetchRelease(ctx context.Context, command, ver, current string, check bool) (fetchedBinary, error) {
+	if strings.TrimSpace(current) == "" {
+		current = version.Version
+	}
+	got, err := release.Prepare(ctx, command, ver, current, check)
 	if err != nil {
 		return fetchedBinary{}, err
 	}
@@ -93,6 +97,30 @@ func targetTag(opt agentsvc.UpgradeOptions) string {
 		return ""
 	}
 	return versionOfBinary(opt.From)
+}
+
+// lookupInstanceBinary is the installed kite-agent for one service.
+// Tests point it at a fake binary. The upgrade comparison uses that
+// binary's version, not the version of the process running the command.
+var lookupInstanceBinary = defaultInstanceBinary
+
+func defaultInstanceBinary(service string) string {
+	if runtime.GOOS == "windows" {
+		lay, err := agentsvc.DefaultLayout(service)
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(lay.InstallDir, "kite-agent.exe")
+	}
+	return agentctl.UnixBinary(service)
+}
+
+func instanceBinaryVersion(service string) string {
+	path := lookupInstanceBinary(service)
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	return versionOfBinary(path)
 }
 
 func versionOfBinary(path string) string {

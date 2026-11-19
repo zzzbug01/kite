@@ -59,7 +59,7 @@ func run(args []string) error {
 		fmt.Fprintf(fs.Output(), "or a gitignored config file. Never commit it.\n\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay invite [--ttl 1h] [--name agent]\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay agents list\n")
-		fmt.Fprintf(fs.Output(), "  kite-relay agents revoke <name>\n")
+		fmt.Fprintf(fs.Output(), "  kite-relay agents revoke <name-or-id>\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay tokens list\n")
 		fmt.Fprintf(fs.Output(), "  kite-relay tokens revoke <id-or-label>\n\n")
 		fmt.Fprintf(fs.Output(), "invite writes a one-time install code into STATE_DIR/install.json\n")

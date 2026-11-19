@@ -332,9 +332,17 @@ func (s *Store) Revoke(name string) (AgentInfo, error) {
 	}
 	match := -1
 	for i, rec := range doc.Agents {
-		if rec.Name == name {
+		if rec.ID == name {
 			match = i
 			break
+		}
+	}
+	if match < 0 {
+		for i, rec := range doc.Agents {
+			if rec.Name == name {
+				match = i
+				break
+			}
 		}
 	}
 	if match < 0 {

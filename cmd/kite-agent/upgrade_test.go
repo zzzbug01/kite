@@ -1,16 +1,102 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/agentsvc"
+	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/protocol"
 )
+
+func TestNamedPairIgnoresEnvRelay(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent.env")
+	body := "RELAY_ADDR=wss://instance.example/agent\nAGENT_TOKEN=kite_agent_file\nAGENT_NAME=box\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAY_ADDR", "wss://old.example/client")
+	t.Setenv("REGISTRATION_KEY", "env-key")
+	cfg, err := config.LoadAgent("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg = preferInstanceFile(cfg, path)
+	if cfg.RelayAddr != "wss://instance.example/agent" {
+		t.Fatalf("relay %q", cfg.RelayAddr)
+	}
+	secret, kind, err := cfg.Credential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != "agent" || secret != "kite_agent_file" {
+		t.Fatalf("%s %s", kind, secret)
+	}
+	if cfg.Name != "box" {
+		t.Fatal(cfg.Name)
+	}
+}
+
+func TestTryControlPairWaitsForListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	path := filepath.Join(t.TempDir(), "agent-control.json")
+	raw, err := json.Marshal(agentctl.Endpoint{Addr: ln.Addr().String(), Token: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+		_ = json.NewEncoder(conn).Encode(agentctl.Response{OK: true, Code: "ABCD-EFGH", Agent: "box"})
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, _, last, perr := tryControlPair(ctx, []string{path}, path, agentctl.Request{Op: "pair"}, 2*time.Second)
+	if last != nil || perr != nil || resp.Code != "ABCD-EFGH" {
+		t.Fatalf("resp %+v last %v primary %v", resp, last, perr)
+	}
+}
+
+func TestInstanceBinaryVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "kite-agent")
+	script := "#!/bin/sh\necho 'kite-agent v0.1.0-rc.5'\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := lookupInstanceBinary
+	t.Cleanup(func() { lookupInstanceBinary = old })
+	lookupInstanceBinary = func(string) string { return bin }
+	if got := instanceBinaryVersion("kite-agent-test3"); got != "v0.1.0-rc.5" {
+		t.Fatalf("version %q", got)
+	}
+}
 
 func TestFillPairNameUsesHostname(t *testing.T) {
 	got, err := fillPairName("")

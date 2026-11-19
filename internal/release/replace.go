@@ -76,7 +76,5 @@ func CleanupOld(exe string) {
 		return
 	}
 	_ = os.Remove(exe + ".prev")
-	if runtime.GOOS == "windows" {
-		_ = os.Remove(exe + ".old")
-	}
+	_ = os.Remove(exe + ".old")
 }

@@ -145,6 +145,29 @@ func TestRevokeDropsToken(t *testing.T) {
 	}
 }
 
+func TestRevokeByListID(t *testing.T) {
+	s := Open(t.TempDir())
+	now := time.Now().UTC()
+	code, _, err := s.Issue("desktop", time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Redeem(code, "desktop", true, now); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List()
+	if err != nil || len(list) != 1 || list[0].ID == "" {
+		t.Fatalf("%+v %v", list, err)
+	}
+	info, err := s.Revoke(list[0].ID)
+	if err != nil || info.Name != "desktop" || info.ID != list[0].ID {
+		t.Fatalf("%+v %v", info, err)
+	}
+	if _, err := s.Revoke(list[0].ID); err == nil {
+		t.Fatal("id still revoked")
+	}
+}
+
 func TestRejectsConnectAndBadTTL(t *testing.T) {
 	s := Open(t.TempDir())
 	if _, _, err := s.Issue("connect", time.Hour, time.Now()); err == nil {
