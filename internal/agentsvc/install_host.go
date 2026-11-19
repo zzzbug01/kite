@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/zzzbug01/kite/internal/agentctl"
 )
@@ -60,11 +59,7 @@ func Preflight(opt Options) error {
 	if os.Geteuid() == 0 {
 		return nil
 	}
-	hint := "sudo kite-agent install"
-	if strings.TrimSpace(opt.Code) != "" {
-		hint = "sudo kite-agent install --relay " + opt.Config.RelayAddr + " --code " + opt.Code
-	}
-	return errors.New("kite-agent install needs root to register the service; re-run: " + hint)
+	return errors.New("kite-agent install needs root to register the service. The install code was not used. Re-run: " + sudoReRun())
 }
 
 // Install on Linux and macOS runs after SSH setup. Root writes the supervisor
@@ -85,7 +80,9 @@ func Install(opt Options) error {
 	if err := os.MkdirAll(filepath.Dir(lay.env), 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(lay.state, 0o700); err != nil {
+	// 0711 so a named instance under /var/lib/kite-agent/<name> can be
+	// reached before a default instance has chmod'd the parent.
+	if err := agentctl.PrepareStateDir(lay.state); err != nil {
 		return err
 	}
 	if err := os.WriteFile(lay.env, []byte(body), 0o600); err != nil {

@@ -278,10 +278,76 @@ copy_bin() {
   fi
 }
 
+note_agent_left_alone() {
+  agent_bin=""
+  if [ -n "$service_name" ] && [ -x "/usr/local/lib/kite/${service_name}/kite-agent" ]; then
+    agent_bin="/usr/local/lib/kite/${service_name}/kite-agent"
+  elif command -v kite-agent >/dev/null 2>&1; then
+    agent_bin=$(command -v kite-agent)
+  elif [ -x /usr/local/bin/kite-agent ]; then
+    agent_bin=/usr/local/bin/kite-agent
+  fi
+  if [ -z "$agent_bin" ]; then
+    return 0
+  fi
+  current=$("$agent_bin" -version 2>/dev/null || true)
+  case "$current" in
+    *"${version}"*) return 0 ;;
+  esac
+  echo "kite-agent (${current:-unknown}) was not updated. The agent service was not restarted."
+  echo "To update it: sudo kite-agent upgrade"
+}
+
+run_as_root() {
+  if [ "$(id -u)" -eq 0 ] || [ "${KITE_NO_SUDO:-}" = "1" ]; then
+    "$@"
+    return $?
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+    return $?
+  fi
+  echo "install.sh: need root to run: $*" >&2
+  return 1
+}
+
 copy_bin "${tmp}/kite" kite
-copy_bin "${tmp}/kite-agent" kite-agent
 if [ "$relay_server" -eq 1 ]; then
   copy_bin "${tmp}/kite-relay" kite-relay
+fi
+
+# A client install updates kite only. It does not replace kite-agent and
+# does not restart an agent service.
+if [ "$agent" -eq 0 ]; then
+  echo "Installed kite ${version} to ${bindir} (kite only; the agent service was not changed)."
+  note_agent_left_alone
+  case ":${PATH}:" in
+    *":${bindir}:"*) ;;
+    *)
+      echo "Add ${bindir} to PATH:"
+      echo "  export PATH=\"${bindir}:\$PATH\""
+      ;;
+  esac
+  exit 0
+fi
+
+extra=""
+if [ -n "$service_name" ]; then
+  extra="--service-name ${service_name}"
+fi
+target_agent="${bindir}/kite-agent"
+if [ -n "$service_name" ]; then
+  target_agent="/usr/local/lib/kite/${service_name}/kite-agent"
+fi
+if [ -x "$target_agent" ]; then
+  # Use the installed binary so a downgrade is refused before the service
+  # is stopped. The copy in this archive may be older than that binary.
+  if ! run_as_root "$target_agent" upgrade --from "${tmp}/kite-agent" --version "$version" $extra; then
+    echo "install.sh: kite-agent upgrade failed. The agent was not replaced." >&2
+    exit 1
+  fi
+else
+  copy_bin "${tmp}/kite-agent" kite-agent
 fi
 
 echo "Installed kite ${version} to ${bindir}"
@@ -293,22 +359,10 @@ case ":${PATH}:" in
     ;;
 esac
 
-if [ "$agent" -eq 1 ]; then
-  extra=""
-  if [ -n "$service_name" ]; then
-    extra="--service-name ${service_name}"
-  fi
-  if [ "$(id -u)" -eq 0 ] || [ "${KITE_NO_SUDO:-}" = "1" ]; then
-    # shellcheck disable=SC2086
-    "${bindir}/kite-agent" install --relay "$relay" --code "$code" $extra
-  elif command -v sudo >/dev/null 2>&1; then
-    # shellcheck disable=SC2086
-    sudo "${bindir}/kite-agent" install --relay "$relay" --code "$code" $extra
-  else
-    echo "install.sh: kite-agent install needs root. The install code was not used. Re-run:" >&2
-    echo "  sudo ${bindir}/kite-agent install --relay ${relay} --code ${code} ${extra}" >&2
-    exit 1
-  fi
-  echo "Next, on this machine: kite-agent pair"
-  echo "If that cannot read the control file: sudo kite-agent pair"
+# shellcheck disable=SC2086
+if ! run_as_root "${bindir}/kite-agent" install --relay "$relay" --code "$code" $extra; then
+  echo "install.sh: kite-agent install failed." >&2
+  exit 1
 fi
+echo "Next, on this machine: kite-agent pair"
+echo "If that cannot read the control file: sudo kite-agent pair"

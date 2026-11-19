@@ -338,9 +338,17 @@ func TestControlPlaneOffWindows(t *testing.T) {
 	if err := Install(Options{}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "root") {
 		t.Fatalf("install: %v", err)
 	}
+	oldArgs := os.Args
+	os.Args = []string{"kite-agent", "install", "--relay", "wss://example.test/agent", "--code", "ABCD-EFGH", "--service-name", "kite-agent-test3"}
+	t.Cleanup(func() { os.Args = oldArgs })
 	hint := Preflight(Options{Code: "ABCD-EFGH", Config: config.Agent{RelayAddr: "wss://example.test/agent"}})
-	if hint == nil || !strings.Contains(hint.Error(), "--code ABCD-EFGH") || strings.Contains(hint.Error(), "REGISTRATION_KEY") {
+	if hint == nil || !strings.Contains(hint.Error(), "--code ABCD-EFGH") || !strings.Contains(hint.Error(), "--service-name kite-agent-test3") || strings.Contains(hint.Error(), "REGISTRATION_KEY") {
 		t.Fatalf("preflight hint: %v", hint)
+	}
+	os.Args = []string{"kite-agent", "upgrade", "--service-name", "kite-agent-test3", "--version", "v0.1.0-rc.3"}
+	up := Upgrade(UpgradeOptions{From: "kite-agent", ServiceName: "kite-agent-test3", Version: "v0.1.0-rc.3"})
+	if up == nil || !strings.Contains(up.Error(), "--service-name kite-agent-test3") || !strings.Contains(up.Error(), "--version v0.1.0-rc.3") {
+		t.Fatalf("upgrade hint: %v", up)
 	}
 	if err := Uninstall(""); err == nil || !strings.Contains(err.Error(), "root") || !strings.Contains(err.Error(), "systemctl") {
 		t.Fatalf("uninstall: %v", err)

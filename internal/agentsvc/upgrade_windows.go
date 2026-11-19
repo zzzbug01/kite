@@ -84,6 +84,10 @@ func scheduleUpgrade(opt UpgradeOptions) error {
 	fmt.Printf("This session can disconnect when the tunnel restarts. The task still finishes.\n")
 	fmt.Printf("Result: %s\n", result)
 	os.Stdout.Sync()
+	before := int64(0)
+	if st, err := os.Stat(result); err == nil {
+		before = st.Size()
+	}
 	if err := schtasks("/Run", "/TN", task); err != nil {
 		_ = schtasks("/Delete", "/TN", task, "/F")
 		_ = os.Remove(xmlPath)
@@ -91,6 +95,12 @@ func scheduleUpgrade(opt UpgradeOptions) error {
 		return fmt.Errorf("start upgrade task: %w", err)
 	}
 	appendUpgradeLog(result, "upgrade task started: "+task)
+	// Wait for the task. A failed swap used to leave the service stopped
+	// while this command exited 0, and the installer then printed success.
+	if err := waitUpgradeResult(result, before, 60*time.Second); err != nil {
+		return err
+	}
+	removePrivateStage(from)
 	return nil
 }
 
@@ -182,7 +192,6 @@ func applyUpgrade(opt UpgradeOptions) error {
 		return err
 	}
 	cleanup()
-	removeUpgradeStage(from)
 	note("starting " + name)
 	if err := startAndWait(s, logPath); err != nil {
 		note("upgrade failed: " + err.Error())
@@ -190,20 +199,6 @@ func applyUpgrade(opt UpgradeOptions) error {
 	}
 	note("upgrade ok: " + name + " running " + dest)
 	return nil
-}
-
-// removeUpgradeStage deletes the private download directory created by
-// kite-agent upgrade. It does not touch a path the operator passed to --from.
-// The scheduled task is this binary, so the directory stays locked until the
-// process exits. cmd removes it a few seconds later.
-func removeUpgradeStage(from string) {
-	dir := filepath.Dir(from)
-	if !strings.Contains(filepath.Base(dir), "kite-upgrade-") {
-		return
-	}
-	cmd := exec.Command("cmd", "/c", "ping -n 4 127.0.0.1 >nul & rmdir /s /q \""+dir+"\"")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	_ = cmd.Start()
 }
 
 func absFile(path string) (string, error) {

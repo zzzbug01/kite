@@ -177,7 +177,7 @@ func newToken() (string, error) {
 }
 
 func writeEndpoint(path string, ep Endpoint) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := PrepareStateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	b, err := json.Marshal(ep)
@@ -319,6 +319,66 @@ func CandidatePaths(configFlag, serviceName string) []string {
 		add("/var/lib/kite/agent-control.json")
 	}
 	return out
+}
+
+// PrepareStateDir creates dir. When dir is the kite-agent state root or a
+// named instance under it, every directory from /var/lib/kite-agent down is
+// mode 0711. MkdirAll(instance, 0700) would leave the parent unsearchable,
+// so `kite-agent pair --service-name` cannot traverse to the instance file
+// until a default install has chmod'd that parent.
+func PrepareStateDir(dir string) error {
+	return prepareStateDir(dir, "/var/lib/kite-agent")
+}
+
+func prepareStateDir(dir, root string) error {
+	perm := os.FileMode(0o700)
+	if runtime.GOOS != "windows" && stateUnder(dir, root) {
+		perm = 0o711
+	}
+	if err := os.MkdirAll(dir, perm); err != nil {
+		return err
+	}
+	if perm == 0o711 {
+		return chmodFromRoot(root, dir)
+	}
+	return nil
+}
+
+func stateUnder(dir, root string) bool {
+	dir = filepath.Clean(dir)
+	root = filepath.Clean(root)
+	return dir == root || strings.HasPrefix(dir, root+string(filepath.Separator))
+}
+
+func chmodStateChain(dir string) error {
+	if stateUnder(dir, "/var/lib/kite-agent") {
+		return chmodFromRoot("/var/lib/kite-agent", dir)
+	}
+	return os.Chmod(dir, 0o711)
+}
+
+func chmodFromRoot(root, dir string) error {
+	root = filepath.Clean(root)
+	dir = filepath.Clean(dir)
+	if err := os.Chmod(root, 0o711); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if dir == root {
+		return nil
+	}
+	rest := strings.TrimPrefix(dir, root)
+	rest = strings.TrimPrefix(rest, string(filepath.Separator))
+	cur := root
+	for _, part := range strings.Split(rest, string(filepath.Separator)) {
+		if part == "" {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		if err := os.Chmod(cur, 0o711); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 // UnixStateDir is where one instance keeps its control file and SSH health.

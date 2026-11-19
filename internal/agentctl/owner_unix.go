@@ -33,7 +33,7 @@ func ShareControlFile(path, username string) error {
 	}
 	dir := filepath.Dir(path)
 	if dir != "" && dir != "." {
-		_ = os.Chmod(dir, 0o711)
+		_ = chmodStateChain(dir)
 	}
 	return os.Chown(path, uid, gid)
 }

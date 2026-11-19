@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
-
 	"strings"
+	"time"
 
+	"github.com/zzzbug01/kite/internal/agentctl"
 	"github.com/zzzbug01/kite/internal/agentsvc"
 	"github.com/zzzbug01/kite/internal/release"
 	"github.com/zzzbug01/kite/internal/version"
@@ -63,17 +65,55 @@ func fetchRelease(ctx context.Context, command, ver string, check bool) (fetched
 	return fetchedBinary{path: path, tag: got.Tag}, nil
 }
 
+// configPathForUpgrade is the instance file the downgrade guard reads.
+// Tests replace it to point at a temp unix layout without KITE_CONFIG.
+var configPathForUpgrade = upgradeConfigPath
+
+func upgradeConfigPath(service string) string {
+	if p := strings.TrimSpace(os.Getenv("KITE_CONFIG")); p != "" {
+		return p
+	}
+	if runtime.GOOS == "windows" {
+		lay, err := agentsvc.DefaultLayout(service)
+		if err != nil {
+			return ""
+		}
+		return lay.ConfigPath
+	}
+	return agentctl.UnixEnvFile(service)
+}
+
+// targetTag is the release --from or --version would install.
+// --version wins. Otherwise the staged binary is asked for -version.
+func targetTag(opt agentsvc.UpgradeOptions) string {
+	if v := strings.TrimSpace(opt.Version); v != "" {
+		return v
+	}
+	if strings.TrimSpace(opt.From) == "" {
+		return ""
+	}
+	return versionOfBinary(opt.From)
+}
+
+func versionOfBinary(path string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "-version").Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
+}
+
 func guardTokenDowngrade(opt agentsvc.UpgradeOptions, tag string) error {
 	if opt.Force || tag == "" || release.SupportsAgentToken(tag) {
 		return nil
 	}
-	path := strings.TrimSpace(os.Getenv("KITE_CONFIG"))
-	if path == "" {
-		if lay, err := agentsvc.DefaultLayout(opt.ServiceName); err == nil {
-			path = lay.ConfigPath
-		}
-	}
-	token, key, err := installSecrets(path)
+	token, key, err := installSecrets(configPathForUpgrade(opt.ServiceName))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil

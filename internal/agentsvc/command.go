@@ -795,6 +795,34 @@ func DefaultLayout(name string) (Layout, error) {
 	return InstanceLayout(name, os.Getenv("ProgramData"), os.Getenv("ProgramFiles"))
 }
 
+// sudoReRun is the command a non-root operator should run again.
+// It keeps every argument from this process, including --service-name,
+// --version, and --code, so the retry does not hit the default instance.
+func sudoReRun() string {
+	args := []string{"sudo", "kite-agent"}
+	if len(os.Args) > 1 {
+		args = append(args, os.Args[1:]...)
+	}
+	var b strings.Builder
+	for i, arg := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(quoteShellArg(arg))
+	}
+	return b.String()
+}
+
+func quoteShellArg(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n'\"\\$") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // ServiceArgs is the service command line after the executable.
 // The default instance omits --service-name so an existing registration
 // stays valid. The registration key is not included.

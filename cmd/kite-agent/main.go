@@ -224,12 +224,21 @@ func run(args []string) error {
 			opt.From = fetched.path
 			rememberSSHUser(opt.ServiceName, "")
 			err = agentsvc.Upgrade(opt)
-			// On Windows the scheduled task copies this file after we return.
-			// It deletes the stage itself. If the task never started, delete it here.
+			// On Windows the scheduled task copies this file. scheduleUpgrade
+			// waits for that result and deletes the stage. If the task never
+			// started, delete it here.
 			if runtime.GOOS == "windows" && err != nil {
 				os.RemoveAll(stage)
 			}
 			return err
+		}
+		if !opt.Apply && opt.From != "" {
+			// --from is how install.ps1 swaps a running service, including a
+			// downgrade to a binary that does not know about agent tokens.
+			// Check before that binary is asked to stop the service.
+			if err := guardTokenDowngrade(opt, targetTag(opt)); err != nil {
+				return err
+			}
 		}
 		rememberSSHUser(opt.ServiceName, "")
 		return agentsvc.Upgrade(opt)

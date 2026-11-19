@@ -74,12 +74,16 @@ kite connect --relay tunnel.example.com ABCD-EFGH
 ssh my-pc
 ```
 
+That installs the `kite` client only. It does not replace `kite-agent` or restart an agent service. To update an agent that is already installed, run `sudo kite-agent upgrade`. `--agent` is what installs the agent.
+
 Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex
 kite connect --relay tunnel.example.com ABCD-EFGH
 ```
+
+Same rule on Windows: the script copies `kite.exe` only, and it does not stop the `kite-agent` service. `kite-agent upgrade` updates the agent.
 
 `--relay` accepts a bare host, `host:port`, `https://`, or a full `wss://` URL. A missing scheme becomes `wss://`. A missing path becomes `/client` for kite and `/agent` for kite-agent.
 
@@ -448,12 +452,16 @@ kite connect --relay tunnel.example.com ABCD-EFGH
 ssh my-pc
 ```
 
+这只安装 `kite` 客户端，不会替换 `kite-agent`，也不会重启 agent 服务。已经装了 agent 时，用 `sudo kite-agent upgrade` 更新它。`--agent` 才会安装 agent。
+
 Windows PowerShell：
 
 ```powershell
 irm https://raw.githubusercontent.com/zzzbug01/kite/main/install.ps1 | iex
 kite connect --relay tunnel.example.com ABCD-EFGH
 ```
+
+Windows 同样只复制 `kite.exe`，不会停止 `kite-agent` 服务。更新 agent 用 `kite-agent upgrade`。
 
 `--relay` 可以是纯主机名、`host:port`、`https://`，或完整的 `wss://` URL。省略协议时用 `wss://`。省略路径时，kite 用 `/client`，kite-agent 用 `/agent`。
 

@@ -94,16 +94,24 @@ func runPair(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var last error
+	var last, primaryErr error
 	sshUser := defaultSSHUser()
 	instCfg := instanceConfig(configPath, name)
 	if sshUser != "" && instCfg != "" {
 		_ = config.SetSSHUser(instCfg, sshUser)
 	}
-	for _, path := range agentctl.CandidatePaths(configPath, name) {
+	paths := agentctl.CandidatePaths(configPath, name)
+	primary := ""
+	if len(paths) > 0 {
+		primary = paths[0]
+	}
+	for _, path := range paths {
 		resp, err := agentctl.Call(ctx, path, agentctl.Request{Op: "pair", TTLSeconds: int(ttl.Seconds()), SSHUser: sshUser})
 		if err != nil {
 			last = err
+			if path == primary {
+				primaryErr = err
+			}
 			continue
 		}
 		hint := resp.Relay
@@ -119,11 +127,11 @@ func runPair(args []string) error {
 	}
 	cfg, loadErr := config.LoadAgent(loadPath)
 	if loadErr != nil {
-		return fmt.Errorf("%s\n%s", pairHelp(last), loadErr)
+		return fmt.Errorf("%s\n%s", pairFailure(primary, primaryErr, last), loadErr)
 	}
 	secret, kind, credErr := cfg.Credential()
 	if credErr != nil {
-		return fmt.Errorf("%s\n%s", pairHelp(last), credErr)
+		return fmt.Errorf("%s\n%s", pairFailure(primary, primaryErr, last), credErr)
 	}
 	base, err := pairing.HTTPBase(cfg.RelayAddr)
 	if err != nil {
@@ -307,13 +315,24 @@ func relayHint(configPath string) string {
 	return u
 }
 
-func pairHelp(err error) string {
+func pairFailure(primary string, primaryErr, last error) string {
+	shown := last
+	if primaryErr != nil {
+		shown = primaryErr
+	}
+	return pairHelp(shown, primary)
+}
+
+func pairHelp(err error, controlPath string) string {
 	msg := `kite-agent pair could not reach the running agent.
 Start kite-agent and retry. On Windows the installing user can pair without
 a further elevation prompt while the service is running. On Linux and macOS,
 run: sudo kite-agent pair
 when the control file is not readable. An agent installed with --code pairs
 with its saved agent token; it does not need REGISTRATION_KEY.`
+	if strings.TrimSpace(controlPath) != "" {
+		msg += "\nThe control file for this instance is " + controlPath + "."
+	}
 	if err != nil {
 		return msg + "\nLast error: " + err.Error()
 	}

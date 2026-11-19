@@ -91,7 +91,7 @@ func RequireUpgradePriv() error {
 	if os.Geteuid() == 0 {
 		return nil
 	}
-	return errors.New("kite-agent upgrade needs root to replace the service binary and restart it. Re-run: sudo kite-agent upgrade")
+	return fmt.Errorf("kite-agent upgrade needs root to replace the service binary and restart it. Re-run: %s", sudoReRun())
 }
 
 // Upgrade replaces this instance's binary and restarts the supervisor.
@@ -106,7 +106,7 @@ func Upgrade(opt UpgradeOptions) error {
 		return errors.New("no binary to install")
 	}
 	if os.Geteuid() != 0 {
-		return errors.New("kite-agent upgrade needs root to replace the service binary and restart it. On Linux: sudo kite-agent upgrade (systemctl restart). On macOS: sudo kite-agent upgrade (launchctl kickstart)")
+		return fmt.Errorf("kite-agent upgrade needs root to replace the service binary and restart it. On Linux that is systemctl restart; on macOS, launchctl kickstart. Re-run: %s", sudoReRun())
 	}
 	lay := unixLayout(opt.ServiceName)
 	st, err := os.Stat(from)
