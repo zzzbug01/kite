@@ -18,6 +18,9 @@ import (
 )
 
 func TestInstallSHReleaseNotFound(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is the Linux and macOS installer")
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh is not installed")
 	}
@@ -37,6 +40,9 @@ func TestInstallSHReleaseNotFound(t *testing.T) {
 }
 
 func TestInstallSHPassesServiceName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is the Linux and macOS installer")
+	}
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh is not installed")
 	}
