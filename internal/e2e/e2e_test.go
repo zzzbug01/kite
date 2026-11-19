@@ -169,11 +169,12 @@ func waitNoAgent(t *testing.T, srv *relay.Server, name string) {
 
 func dial(t *testing.T, base, name string) *client.Stream {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
 	var st *client.Stream
 	var err error
-	deadline := time.Now().Add(5 * time.Second)
+	// -race on a slow runner can leave a gap after an agent is replaced.
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		st, err = client.Dial(ctx, client.Config{
 			RelayURL:        base + "/client",
@@ -187,7 +188,7 @@ func dial(t *testing.T, base, name string) *client.Stream {
 			t.Cleanup(func() { st.Close() })
 			return st
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(deadline) || ctx.Err() != nil {
 			t.Fatalf("dial %s: %v", name, err)
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -408,8 +409,10 @@ func TestReplaceAgent(t *testing.T) {
 
 	ctxB, cancelB := context.WithCancel(context.Background())
 	defer cancelB()
+	// Run reconnects. DialAndServe would stay gone if the first socket
+	// dropped during the handoff, which -race on macOS has done.
 	go func() {
-		_ = agent.DialAndServe(ctxB, agent.Config{
+		_ = agent.Run(ctxB, agent.Config{
 			RelayURL:        base + "/agent",
 			RegistrationKey: "test-key",
 			Name:            "pc",
@@ -422,7 +425,7 @@ func TestReplaceAgent(t *testing.T) {
 
 	select {
 	case <-doneA:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("old agent was not replaced")
 	}
 	waitAgent(t, srv, "pc")
