@@ -17,7 +17,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -628,6 +630,18 @@ func TestPairingAndClientToken(t *testing.T) {
 	home := t.TempDir()
 	local := startEcho(t)
 	admin := false
+	sshUser := "tester"
+	if runtime.GOOS == "windows" {
+		// icacls rejects an account that does not exist on this machine.
+		u, err := user.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sshUser = u.Username
+		if i := strings.LastIndexAny(sshUser, `\/`); i >= 0 {
+			sshUser = sshUser[i+1:]
+		}
+	}
 	go func() {
 		_ = agent.Run(ctx, agent.Config{
 			RelayURL:        base + "/agent",
@@ -637,7 +651,7 @@ func TestPairingAndClientToken(t *testing.T) {
 			IdleTimeout:     time.Hour,
 			PingInterval:    time.Hour,
 			Logger:          discard(),
-			SSHUser:         "tester",
+			SSHUser:         sshUser,
 			HomeDir:         home,
 			SSHAdmin:        &admin,
 		})
@@ -648,7 +662,7 @@ func TestPairingAndClientToken(t *testing.T) {
 	created, err := pairing.PostCreate(ctx, httpBase, pairing.CreateRequest{
 		Key:       "test-key",
 		Agent:     "pc",
-		SSHUser:   "tester",
+		SSHUser:   sshUser,
 		ClientURL: base + "/client",
 	})
 	if err != nil {
@@ -692,7 +706,7 @@ func TestPairingAndClientToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if redeemed.Agent != "pc" || redeemed.SSHUser != "tester" || !strings.HasPrefix(redeemed.ClientToken, "kite_") {
+	if redeemed.Agent != "pc" || redeemed.SSHUser != sshUser || !strings.HasPrefix(redeemed.ClientToken, "kite_") {
 		t.Fatalf("%+v", redeemed)
 	}
 	if _, err := pairing.PostRedeem(ctx, httpBase, pairing.RedeemRequest{

@@ -16,6 +16,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -317,19 +318,19 @@ func UnixStateDir(serviceName string) string {
 	dir := "/var/lib/kite-agent"
 	name := strings.TrimSpace(serviceName)
 	if name != "" && !strings.EqualFold(name, "kite-agent") {
-		dir = filepath.Join(dir, name)
+		dir = path.Join(dir, name)
 	}
 	return dir
 }
 
 // UnixControlPath is the instance control file.
 func UnixControlPath(serviceName string) string {
-	return filepath.Join(UnixStateDir(serviceName), "agent-control.json")
+	return path.Join(UnixStateDir(serviceName), "agent-control.json")
 }
 
 // UnixHealthPath is the instance local-SSH health file.
 func UnixHealthPath(serviceName string) string {
-	return filepath.Join(UnixStateDir(serviceName), "ssh-health.json")
+	return path.Join(UnixStateDir(serviceName), "ssh-health.json")
 }
 
 // UnixEnvFile is the env file install writes for this instance.
@@ -338,7 +339,7 @@ func UnixEnvFile(serviceName string) string {
 	if name == "" || strings.EqualFold(name, "kite-agent") {
 		return "/etc/kite/agent.env"
 	}
-	return filepath.Join("/etc/kite", name, "agent.env")
+	return path.Join("/etc/kite", name, "agent.env")
 }
 
 // UnixBinary is the installed executable. The default stays on PATH.
@@ -348,27 +349,29 @@ func UnixBinary(serviceName string) string {
 	if name == "" || strings.EqualFold(name, "kite-agent") {
 		return "/usr/local/bin/kite-agent"
 	}
-	return filepath.Join("/usr/local/lib/kite", name, "kite-agent")
+	return path.Join("/usr/local/lib/kite", name, "kite-agent")
 }
 
 // InstanceOfEnv reports the instance name stored in an install env path.
 // /etc/kite/agent.env is the default. /etc/kite/<name>/agent.env is that name.
-func InstanceOfEnv(path string) (string, bool) {
-	path = filepath.Clean(strings.TrimSpace(path))
-	if path == "" {
+func InstanceOfEnv(envPath string) (string, bool) {
+	// These are Unix paths written into unit files. path.Clean keeps the
+	// slashes when the test runs on Windows.
+	envPath = path.Clean(strings.TrimSpace(envPath))
+	if envPath == "" || envPath == "." {
 		return "", false
 	}
-	if path == "/etc/kite/agent.env" {
+	if envPath == "/etc/kite/agent.env" {
 		return "kite-agent", true
 	}
-	if filepath.Base(path) != "agent.env" {
+	if path.Base(envPath) != "agent.env" {
 		return "", false
 	}
-	dir := filepath.Dir(path)
-	if filepath.Dir(dir) != "/etc/kite" {
+	dir := path.Dir(envPath)
+	if path.Dir(dir) != "/etc/kite" {
 		return "", false
 	}
-	name := filepath.Base(dir)
+	name := path.Base(dir)
 	if name == "" || name == "kite-agent" || name == "." || name == ".." {
 		return "", false
 	}

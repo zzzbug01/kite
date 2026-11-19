@@ -81,7 +81,7 @@ func TestSystemdUnitMatchesDeployFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != unit {
+	if strings.ReplaceAll(string(body), "\r\n", "\n") != unit {
 		t.Fatalf("deploy/kite-agent.service drifted from the unit install writes:\n--- deploy\n%s\n--- install\n%s", body, unit)
 	}
 }
