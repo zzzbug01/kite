@@ -9,7 +9,24 @@ import (
 	"testing"
 
 	"github.com/zzzbug01/kite/internal/agentsvc"
+	"github.com/zzzbug01/kite/internal/protocol"
 )
+
+func TestFillPairNameUsesHostname(t *testing.T) {
+	got, err := fillPairName("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("empty name")
+	}
+	if err := protocol.CheckAgentName(got); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := fillPairName("desktop"); err != nil || got != "desktop" {
+		t.Fatalf("%q %v", got, err)
+	}
+}
 
 func TestPairHelpNamesTheInstance(t *testing.T) {
 	got := pairFailure(

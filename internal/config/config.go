@@ -22,6 +22,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzzbug01/kite/internal/protocol"
+	"github.com/zzzbug01/kite/internal/windir"
 )
 
 // PlaceholderKey is the example secret shipped in sample configs.
@@ -615,11 +616,7 @@ func writePrivate(path string, data []byte) error {
 
 func defaultStateDir() string {
 	if runtime.GOOS == "windows" {
-		root := strings.TrimSpace(os.Getenv("ProgramData"))
-		if root == "" {
-			root = `C:\ProgramData`
-		}
-		return filepath.Join(root, "kite", "state")
+		return filepath.Join(windir.ProgramData(), "kite", "state")
 	}
 	return "/var/lib/kite"
 }
@@ -769,11 +766,7 @@ func WindowsMachineConfig() string {
 	if runtime.GOOS != "windows" {
 		return ""
 	}
-	root := strings.TrimSpace(os.Getenv("ProgramData"))
-	if root == "" {
-		root = `C:\ProgramData`
-	}
-	return filepath.Join(root, "kite", "config.yaml")
+	return filepath.Join(windir.ProgramData(), "kite", "config.yaml")
 }
 
 // discoverConfig finds a config outside the git working tree.

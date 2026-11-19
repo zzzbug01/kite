@@ -20,6 +20,7 @@ import (
 	"github.com/zzzbug01/kite/internal/config"
 	"github.com/zzzbug01/kite/internal/protocol"
 	"github.com/zzzbug01/kite/internal/sshheal"
+	"github.com/zzzbug01/kite/internal/windir"
 )
 
 const (
@@ -790,9 +791,10 @@ func InstanceLayout(name, programData, programFiles string) (Layout, error) {
 	}, nil
 }
 
-// DefaultLayout uses ProgramData and ProgramFiles from the environment.
+// DefaultLayout uses the same ProgramData and Program Files resolution as
+// install.ps1: ProgramW6432, then ProgramFiles, then the Known Folder.
 func DefaultLayout(name string) (Layout, error) {
-	return InstanceLayout(name, os.Getenv("ProgramData"), os.Getenv("ProgramFiles"))
+	return InstanceLayout(name, windir.ProgramData(), windir.ProgramFiles())
 }
 
 // sudoReRun is the command a non-root operator should run again.

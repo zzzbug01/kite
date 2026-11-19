@@ -129,6 +129,11 @@ func runPair(args []string) error {
 	if loadErr != nil {
 		return fmt.Errorf("%s\n%s", pairFailure(primary, primaryErr, last), loadErr)
 	}
+	nameFilled, err := fillPairName(cfg.Name)
+	if err != nil {
+		return err
+	}
+	cfg.Name = nameFilled
 	secret, kind, credErr := cfg.Credential()
 	if credErr != nil {
 		return fmt.Errorf("%s\n%s", pairFailure(primary, primaryErr, last), credErr)
@@ -313,6 +318,17 @@ func relayHint(configPath string) string {
 		return ""
 	}
 	return u
+}
+
+// fillPairName uses the hostname when the config has no agent name.
+// kite-agent run already does this. pair must too, or the relay rejects
+// the empty name.
+func fillPairName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name != "" {
+		return name, nil
+	}
+	return agent.DefaultAgentName()
 }
 
 func pairFailure(primary string, primaryErr, last error) string {

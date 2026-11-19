@@ -74,7 +74,7 @@ kite connect --relay tunnel.example.com ABCD-EFGH
 ssh my-pc
 ```
 
-That installs the `kite` client only. It does not replace `kite-agent` or restart an agent service. To update an agent that is already installed, run `sudo kite-agent upgrade`. `--agent` is what installs the agent.
+That installs the `kite` client only. It does not replace `kite-agent` or restart an agent service. To update an agent that is already installed, run `sudo kite-agent upgrade`, or `install.sh --agent` with no `--code` (that keeps the existing token). `--code` is required only for a new instance, and a named `--service-name` never replaces the default agent binary.
 
 Windows PowerShell:
 
@@ -452,7 +452,7 @@ kite connect --relay tunnel.example.com ABCD-EFGH
 ssh my-pc
 ```
 
-这只安装 `kite` 客户端，不会替换 `kite-agent`，也不会重启 agent 服务。已经装了 agent 时，用 `sudo kite-agent upgrade` 更新它。`--agent` 才会安装 agent。
+这只安装 `kite` 客户端，不会替换 `kite-agent`，也不会重启 agent 服务。已经装了 agent 时，用 `sudo kite-agent upgrade` 更新，或者不带 `--code` 再跑一次 `install.sh --agent`（保留现有令牌）。只有新实例才需要 `--code`。带 `--service-name` 的安装不会替换默认实例的二进制。
 
 Windows PowerShell：
 

@@ -75,9 +75,8 @@ if ($Version -match '^[0-9]') { $Version = "v$Version" }
 if ($RelayServer) {
   throw 'kite-relay is installed on Linux. This script does not install it on Windows.'
 }
-if ($Agent -and ([string]::IsNullOrWhiteSpace($Relay) -or [string]::IsNullOrWhiteSpace($Code))) {
-  throw '--agent requires --relay and --code (or KITE_RELAY and KITE_CODE)'
-}
+# --code is required only when the service is not installed yet. An existing
+# instance can be upgraded with --agent and no code.
 if ($Relay -match "[\r\n'`"]" -or $Code -match "[\r\n'`"]" -or $Version -match "[\r\n'`"]") {
   throw 'version, relay, and code cannot contain quotes or newlines'
 }
@@ -154,6 +153,61 @@ function Expand-KiteList($raw) {
     foreach ($inner in $cur) { $queue.Enqueue($inner) }
   }
   return ,$items.ToArray()
+}
+
+function Get-KiteProgramFiles {
+  if (-not [string]::IsNullOrWhiteSpace($env:ProgramW6432)) { return $env:ProgramW6432 }
+  if (-not [string]::IsNullOrWhiteSpace($env:ProgramFiles)) { return $env:ProgramFiles }
+  $known = Get-KiteKnownFolder '6D809377-6AF0-444b-8957-A3773F02200E'
+  if (-not [string]::IsNullOrWhiteSpace($known)) { return $known }
+  return 'C:\Program Files'
+}
+
+function Get-KiteKnownFolder([string]$Guid) {
+  try {
+    if (-not ('Kite.KnownFolder' -as [type])) {
+      Add-Type -Namespace Kite -Name KnownFolder -MemberDefinition @'
+[DllImport("shell32.dll")]
+public static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr pszPath);
+'@
+    }
+    $ptr = [IntPtr]::Zero
+    $hr = [Kite.KnownFolder]::SHGetKnownFolderPath([Guid]$Guid, [uint32]0, [IntPtr]::Zero, [ref]$ptr)
+    if ($hr -ne 0 -or $ptr -eq [IntPtr]::Zero) { return $null }
+    $path = [Runtime.InteropServices.Marshal]::PtrToStringUni($ptr)
+    [Runtime.InteropServices.Marshal]::FreeCoTaskMem($ptr)
+    return $path
+  } catch {
+    return $null
+  }
+}
+
+# CopyDefaultAgent is true only for the default service. A named install
+# stages kite-agent.exe and lets `install --service-name` copy it into that
+# instance's directory. The client kite.exe is the only PATH binary.
+function Get-KiteInstallTargets($Dest, $ServiceName, $Agent) {
+  $named = -not [string]::IsNullOrWhiteSpace($ServiceName) -and ($ServiceName -ne 'kite-agent')
+  $svc = 'kite-agent'
+  if ($named) { $svc = $ServiceName }
+  $serviceDir = $Dest
+  if ($named) { $serviceDir = Join-Path $Dest $svc }
+  $copyDefaultAgent = $false
+  if ($Agent -and -not $named) { $copyDefaultAgent = $true }
+  return [pscustomobject]@{
+    Service = $svc
+    Named = [bool]$named
+    ClientExe = (Join-Path $Dest 'kite.exe')
+    DefaultAgent = (Join-Path $Dest 'kite-agent.exe')
+    ServiceDir = $serviceDir
+    CopyDefaultAgent = [bool]$copyDefaultAgent
+  }
+}
+
+function Get-KiteInstanceHint($Command, $ServiceName) {
+  if ($ServiceName -and $ServiceName -ne 'kite-agent') {
+    return "$Command --service-name $ServiceName"
+  }
+  return $Command
 }
 
 if ($env:KITE_INSTALL_LIB_ONLY -eq '1') { return }
@@ -237,9 +291,7 @@ try {
 
   $dest = $null
   if (Test-KiteAdmin) {
-    $root = $env:ProgramFiles
-    if ([string]::IsNullOrWhiteSpace($root)) { $root = 'C:\Program Files' }
-    $dest = Join-Path $root 'kite'
+    $dest = Join-Path (Get-KiteProgramFiles) 'kite'
   } else {
     $root = $env:LOCALAPPDATA
     if ([string]::IsNullOrWhiteSpace($root)) { throw 'LOCALAPPDATA is not set' }
@@ -250,90 +302,87 @@ try {
     if (-not (Test-Path (Join-Path $out $name))) { throw "archive does not contain $name" }
     Unblock-File -Path (Join-Path $out $name)
   }
-  $agentExe = $null
-  $didUpgrade = $false
-  $svc = 'kite-agent'
-  if (-not [string]::IsNullOrWhiteSpace($ServiceName)) { $svc = $ServiceName }
+  $plan = Get-KiteInstallTargets $dest $ServiceName $Agent
+  $svc = $plan.Service
   $svcExists = $false
   try {
     Get-Service -Name $svc -ErrorAction Stop | Out-Null
     $svcExists = $true
   } catch {}
-  # Without --agent this is a client install: kite.exe only. Do not stop
-  # or replace a running kite-agent service.
+  if ($Agent -and -not $svcExists -and ([string]::IsNullOrWhiteSpace($Relay) -or [string]::IsNullOrWhiteSpace($Code))) {
+    throw "--agent requires --relay and --code when $svc is not installed yet"
+  }
+  $pairHint = Get-KiteInstanceHint 'kite-agent pair' $svc
+  $upgradeHint = Get-KiteInstanceHint 'kite-agent upgrade' $svc
+  $agentExe = $null
+  $didUpgrade = $false
+  # Client kite.exe is the only binary copied onto the PATH directory.
+  Copy-Item -LiteralPath (Join-Path $out 'kite.exe') -Destination $plan.ClientExe
+  Unblock-File -LiteralPath $plan.ClientExe
   if (-not $Agent) {
-    Copy-Item -LiteralPath (Join-Path $out 'kite.exe') -Destination (Join-Path $dest 'kite.exe')
-    Unblock-File -LiteralPath (Join-Path $dest 'kite.exe')
     Write-Host "Installed kite $Version"
-    Write-Host "  kite.exe -> $(Join-Path $dest 'kite.exe')"
+    Write-Host "  kite.exe -> $($plan.ClientExe)"
     if ($svcExists) {
       Write-Host "kite-agent service $svc was not updated or restarted."
-      Write-Host "To update it: kite-agent upgrade"
+      Write-Host "To update it: $upgradeHint"
     }
-  } elseif ($svcExists) {
-    # Ask the installed agent to swap. The downloaded binary may be older
-    # and would not refuse a token-only downgrade. --version makes the
-    # guard apply to this --from path. The command waits for the result.
+  } else {
     $stage = Join-Path $env:TEMP ("kite-upgrade-" + [guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $stage | Out-Null
+    $cleanupStage = $true
     try {
-      Copy-Item -LiteralPath (Join-Path $out 'kite.exe') -Destination (Join-Path $stage 'kite.exe')
       Copy-Item -LiteralPath (Join-Path $out 'kite-agent.exe') -Destination (Join-Path $stage 'kite-agent.exe')
+      if (Test-Path (Join-Path $out 'kite.exe')) {
+        Copy-Item -LiteralPath (Join-Path $out 'kite.exe') -Destination (Join-Path $stage 'kite.exe')
+      }
       $staged = Join-Path $stage 'kite-agent.exe'
+      $instanceExe = Join-Path $plan.ServiceDir 'kite-agent.exe'
+      # A named install must not treat the default service binary as its own.
       $runner = $staged
-      $named = $null
-      if ($svc -ne 'kite-agent' -and $env:ProgramFiles) {
-        $named = Join-Path $env:ProgramFiles (Join-Path 'kite' (Join-Path $svc 'kite-agent.exe'))
+      if ($svcExists -and (Test-Path -LiteralPath $instanceExe)) { $runner = $instanceExe }
+      elseif ($svcExists -and $plan.CopyDefaultAgent -and (Test-Path -LiteralPath $plan.DefaultAgent)) { $runner = $plan.DefaultAgent }
+      elseif ($svcExists -and -not $plan.Named -and (Test-Path -LiteralPath $plan.DefaultAgent)) { $runner = $plan.DefaultAgent }
+      if ($plan.CopyDefaultAgent -and -not $svcExists) {
+        Copy-Item -LiteralPath $staged -Destination $plan.DefaultAgent
+        Unblock-File -LiteralPath $plan.DefaultAgent
+        $runner = $plan.DefaultAgent
       }
-      $defaultExe = Join-Path $dest 'kite-agent.exe'
-      if ($named -and (Test-Path -LiteralPath $named)) { $runner = $named }
-      elseif (Test-Path -LiteralPath $defaultExe) { $runner = $defaultExe }
-      & $runner upgrade --from $staged --version $Version --service-name $svc
-      if ($LASTEXITCODE -ne 0) {
-        throw "kite-agent upgrade failed ($LASTEXITCODE). The agent service was not left half-updated."
+      if ($svcExists) {
+        & $runner upgrade --from $staged --version $Version --service-name $svc
+        if ($LASTEXITCODE -ne 0) {
+          throw "kite-agent upgrade failed ($LASTEXITCODE). The agent service was not left half-updated."
+        }
+        $didUpgrade = $true
+        $agentExe = $instanceExe
+        if (-not (Test-Path -LiteralPath $agentExe)) { $agentExe = $runner }
+        Write-Host "Installed kite $Version"
+        Write-Host "  kite.exe -> $($plan.ClientExe)"
+        Write-Host "  service $svc -> $($plan.ServiceDir)"
+        if ([string]::IsNullOrWhiteSpace($Code)) {
+          Write-Host "No install code was given, so the existing token was kept."
+          Write-Host "Next, on this machine: $pairHint"
+          Write-Host "To update it later: $upgradeHint"
+        }
+      } else {
+        $agentExe = $runner
+        Write-Host "Installed kite $Version"
+        Write-Host "  kite.exe -> $($plan.ClientExe)"
+        if ($plan.Named) {
+          Write-Host "  service $svc -> $($plan.ServiceDir)"
+        } else {
+          Write-Host "  kite-agent.exe -> $($plan.DefaultAgent)"
+        }
       }
-      Copy-Item -LiteralPath (Join-Path $out 'kite.exe') -Destination (Join-Path $dest 'kite.exe')
-      Unblock-File -LiteralPath (Join-Path $dest 'kite.exe')
-      $didUpgrade = $true
-      if ($runner -ne $staged) { $agentExe = $runner }
-      elseif ($named) { $agentExe = $named }
-      else { $agentExe = $defaultExe }
-      $agentDir = Split-Path -Parent $agentExe
-      Write-Host "Installed kite $Version"
-      Write-Host "  kite.exe -> $(Join-Path $dest 'kite.exe')"
-      Write-Host "  service $svc -> $agentDir"
+      if (-not [string]::IsNullOrWhiteSpace($Code)) {
+        if (-not $agentExe) { $agentExe = $staged }
+        & $agentExe install --relay $Relay --code $Code --service-name $svc
+        if ($LASTEXITCODE -ne 0) { throw "kite-agent install failed ($LASTEXITCODE)" }
+        Write-Host "Next, on this machine: $pairHint"
+        Write-Host "If that cannot read the control file: sudo $pairHint"
+      }
     } finally {
       Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
     }
-  } else {
-    # Copy both, or restore both. A locked kite-agent.exe must not leave a new kite.exe behind.
-    $backs = @()
-    try {
-      foreach ($name in @('kite.exe', 'kite-agent.exe')) {
-        $target = Join-Path $dest $name
-        $src = Join-Path $out $name
-        $bak = $target + '.prev'
-        if (Test-Path -LiteralPath $target) {
-          if (Test-Path -LiteralPath $bak) { Remove-Item -LiteralPath $bak -Force }
-          Move-Item -LiteralPath $target -Destination $bak
-          $backs += ,@($target, $bak)
-        }
-        Copy-Item -LiteralPath $src -Destination $target
-        Unblock-File -LiteralPath $target
-      }
-      foreach ($pair in $backs) {
-        Remove-Item -LiteralPath $pair[1] -Force -ErrorAction SilentlyContinue
-      }
-    } catch {
-      for ($i = $backs.Count - 1; $i -ge 0; $i--) {
-        $target = $backs[$i][0]
-        $bak = $backs[$i][1]
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
-        if (Test-Path -LiteralPath $bak) { Move-Item -LiteralPath $bak -Destination $target }
-      }
-      throw "could not replace the binaries (is $svc running?). The previous files were put back. $_"
-    }
-    $agentExe = Join-Path $dest 'kite-agent.exe'
   }
 
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -350,22 +399,6 @@ try {
     $env:Path = $dest + ';' + $env:Path
   }
 
-  if ($Agent) {
-    if (-not $agentExe) { $agentExe = Join-Path $dest 'kite-agent.exe' }
-    if (-not (Test-Path -LiteralPath $agentExe)) { $agentExe = Join-Path $out 'kite-agent.exe' }
-    if (-not $didUpgrade) {
-      Write-Host "Installed kite $Version"
-      Write-Host "  kite.exe -> $(Join-Path $dest 'kite.exe')"
-      Write-Host "  kite-agent.exe -> $agentExe"
-    }
-    $installArgs = @('install', '--relay', $Relay, '--code', $Code)
-    if (-not [string]::IsNullOrWhiteSpace($ServiceName)) {
-      $installArgs += @('--service-name', $ServiceName)
-    }
-    & $agentExe @installArgs
-    if ($LASTEXITCODE -ne 0) { throw "kite-agent install failed ($LASTEXITCODE)" }
-    Write-Host 'Next, on this machine: kite-agent pair'
-  }
 } finally {
   Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

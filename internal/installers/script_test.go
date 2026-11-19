@@ -184,6 +184,165 @@ func TestInstallSHAgentUpgradeFailureIsFatal(t *testing.T) {
 	}
 }
 
+func TestInstallSHNamedInstallLeavesDefaultBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is the Linux and macOS installer")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := []byte("#!/bin/sh\necho DEFAULT-AGENT\n")
+	if err := os.WriteFile(filepath.Join(bin, "kite-agent"), marker, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(dir, "args.txt")
+	srv, version := serveArchive(t)
+	defer srv.Close()
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), "install.sh"),
+		"--version", version, "--agent", "--relay", "example.test", "--code", "ABCD-EFGH",
+		"--service-name", "kite-agent-test3")
+	cmd.Env = append(os.Environ(),
+		"KITE_RELEASE_BASE="+srv.URL+"/dl",
+		"KITE_BIN_DIR="+bin,
+		"KITE_NO_SUDO=1",
+		"KITE_TEST_ARGS="+argsFile,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("install: %v\n%s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(bin, "kite-agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(marker) {
+		t.Fatalf("named install replaced the default agent:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "kite")); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("staged agent was not run: %v\n%s", err, out)
+	}
+	text := string(args)
+	for _, want := range []string{"install", "--service-name", "kite-agent-test3", "--code", "ABCD-EFGH"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("args %q missing %q\n%s", text, want, out)
+		}
+	}
+	if !strings.Contains(string(out), "kite-agent pair --service-name kite-agent-test3") {
+		t.Fatalf("hint dropped --service-name:\n%s", out)
+	}
+}
+
+func TestInstallSHNamedExistingInstanceUpgradesWithoutCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is the Linux and macOS installer")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	sys := filepath.Join(dir, "sys")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sys, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// systemctl can see the unit. The binary under /usr/local/lib/kite is not visible.
+	systemctl := "#!/bin/sh\nif [ \"$1\" = cat ] && [ \"$2\" = kite-agent-test3.service ]; then exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(sys, "systemctl"), []byte(systemctl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(dir, "args.txt")
+	marker := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$KITE_TEST_ARGS\"\nif [ \"$1\" = upgrade ]; then exit 0; fi\necho DEFAULT-AGENT\n"
+	if err := os.WriteFile(filepath.Join(bin, "kite-agent"), []byte(marker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	srv, version := serveArchive(t)
+	defer srv.Close()
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), "install.sh"),
+		"--version", version, "--agent", "--service-name", "kite-agent-test3")
+	cmd.Env = append(os.Environ(),
+		"KITE_RELEASE_BASE="+srv.URL+"/dl",
+		"KITE_BIN_DIR="+bin,
+		"KITE_NO_SUDO=1",
+		"KITE_TEST_ARGS="+argsFile,
+		"PATH="+sys+":"+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("upgrade: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(filepath.Join(bin, "kite-agent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "DEFAULT-AGENT") {
+		t.Fatalf("default binary was replaced:\n%s", body)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(args)
+	if !strings.Contains(text, "upgrade") || !strings.Contains(text, "--service-name") || !strings.Contains(text, "kite-agent-test3") {
+		t.Fatalf("args %q\n%s", text, out)
+	}
+	if strings.Contains(text, " install ") || strings.HasPrefix(strings.TrimSpace(text), "install ") {
+		t.Fatalf("re-run without --code redeemed again: %q", text)
+	}
+	if !strings.Contains(string(out), "existing token was kept") || !strings.Contains(string(out), "pair --service-name kite-agent-test3") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+func TestInstallPS1NamedPlanDoesNotCopyDefaultAgent(t *testing.T) {
+	ps := powershell()
+	if ps == "" {
+		t.Skip("powershell is not installed")
+	}
+	probe := filepath.Join(t.TempDir(), "plan.ps1")
+	body := strings.ReplaceAll(psPlan, "INSTALL_PS1", filepath.Join(repoRoot(t), "install.ps1"))
+	if err := os.WriteFile(probe, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", probe)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("powershell: %v\n%s", err, out)
+	}
+}
+
+const psPlan = `
+$ErrorActionPreference = 'Stop'
+$env:KITE_INSTALL_LIB_ONLY = '1'
+. 'INSTALL_PS1'
+$named = Get-KiteInstallTargets 'kite' 'kite-agent-test3' $true
+if ($named.CopyDefaultAgent) { throw 'named install would copy the default agent binary' }
+if ($named.ServiceDir -notmatch 'kite-agent-test3$') { throw "service dir $($named.ServiceDir)" }
+if ($named.DefaultAgent -match 'kite-agent-test3') { throw "default agent path $($named.DefaultAgent)" }
+$def = Get-KiteInstallTargets 'kite' '' $true
+if (-not $def.CopyDefaultAgent) { throw 'default install should update its own agent binary' }
+if ($def.ServiceDir -ne 'kite') { throw "default dir $($def.ServiceDir)" }
+$client = Get-KiteInstallTargets 'kite' 'kite-agent-test3' $false
+if ($client.CopyDefaultAgent) { throw 'client install would copy an agent binary' }
+$hint = Get-KiteInstanceHint 'kite-agent pair' 'kite-agent-test3'
+if ($hint -ne 'kite-agent pair --service-name kite-agent-test3') { throw "hint $hint" }
+$plain = Get-KiteInstanceHint 'kite-agent upgrade' 'kite-agent'
+if ($plain -ne 'kite-agent upgrade') { throw "plain $plain" }
+$files = Get-KiteProgramFiles
+if ([string]::IsNullOrWhiteSpace($files)) { throw 'ProgramFiles resolved empty' }
+`
+
 func TestInstallPS1ElevationCapture(t *testing.T) {
 	ps := powershell()
 	if ps == "" {

@@ -106,12 +106,8 @@ case "$version" in
   [0-9]*) version="v$version" ;;
 esac
 
-if [ "$agent" -eq 1 ]; then
-  if [ -z "$relay" ] || [ -z "$code" ]; then
-    echo "install.sh: --agent requires --relay and --code" >&2
-    exit 1
-  fi
-fi
+# --code is required only for a new instance. An existing instance can be
+# upgraded with --agent and no code; a code re-redeems the token.
 
 os=$(uname -s)
 case "$os" in
@@ -278,22 +274,84 @@ copy_bin() {
   fi
 }
 
-note_agent_left_alone() {
-  agent_bin=""
-  if [ -n "$service_name" ] && [ -x "/usr/local/lib/kite/${service_name}/kite-agent" ]; then
-    agent_bin="/usr/local/lib/kite/${service_name}/kite-agent"
-  elif command -v kite-agent >/dev/null 2>&1; then
-    agent_bin=$(command -v kite-agent)
-  elif [ -x /usr/local/bin/kite-agent ]; then
-    agent_bin=/usr/local/bin/kite-agent
+# instance_exists does not read /usr/local/lib/kite. That directory is 0700,
+# so a non-root check of the named binary always fails and used to skip the
+# upgrade guard. Unit files, the 0711 state directory, and systemctl/launchctl
+# are visible without that directory.
+instance_exists() {
+  name=$1
+  if [ -z "$name" ]; then
+    name=kite-agent
   fi
-  if [ -z "$agent_bin" ]; then
+  if [ -f "/etc/systemd/system/${name}.service" ]; then
     return 0
   fi
-  current=$("$agent_bin" -version 2>/dev/null || true)
-  case "$current" in
-    *"${version}"*) return 0 ;;
-  esac
+  if [ -f "/Library/LaunchDaemons/com.kite.${name}.plist" ]; then
+    return 0
+  fi
+  if [ "$name" = "kite-agent" ]; then
+    if [ -f /var/lib/kite-agent/agent-control.json ]; then
+      return 0
+    fi
+  elif [ -d "/var/lib/kite-agent/${name}" ]; then
+    return 0
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl cat "${name}.service" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  if command -v launchctl >/dev/null 2>&1; then
+    if launchctl print "system/com.kite.${name}" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  if [ "$name" = "kite-agent" ]; then
+    if [ -x "${bindir}/kite-agent" ] || [ -x /usr/local/bin/kite-agent ]; then
+      return 0
+    fi
+    if command -v kite-agent >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+instance_flag() {
+  if [ -n "$service_name" ] && [ "$service_name" != "kite-agent" ]; then
+    printf '%s\n' "--service-name ${service_name}"
+  fi
+}
+
+note_agent_left_alone() {
+  label=kite-agent
+  if [ -n "$service_name" ] && [ "$service_name" != "kite-agent" ]; then
+    label=$service_name
+    if ! instance_exists "$label"; then
+      return 0
+    fi
+    echo "kite-agent service ${label} was not updated. The agent service was not restarted."
+    echo "To update it: sudo kite-agent upgrade --service-name ${label}"
+    return 0
+  fi
+  if ! instance_exists kite-agent; then
+    return 0
+  fi
+  agent_bin=""
+  if [ -x "${bindir}/kite-agent" ]; then
+    agent_bin="${bindir}/kite-agent"
+  elif [ -x /usr/local/bin/kite-agent ]; then
+    agent_bin=/usr/local/bin/kite-agent
+  elif command -v kite-agent >/dev/null 2>&1; then
+    agent_bin=$(command -v kite-agent)
+  fi
+  current=""
+  if [ -n "$agent_bin" ]; then
+    current=$("$agent_bin" -version 2>/dev/null || true)
+    case "$current" in
+      *"${version}"*) return 0 ;;
+    esac
+  fi
   echo "kite-agent (${current:-unknown}) was not updated. The agent service was not restarted."
   echo "To update it: sudo kite-agent upgrade"
 }
@@ -331,26 +389,69 @@ if [ "$agent" -eq 0 ]; then
   exit 0
 fi
 
-extra=""
-if [ -n "$service_name" ]; then
-  extra="--service-name ${service_name}"
+extra=$(instance_flag)
+named=0
+svc=kite-agent
+if [ -n "$service_name" ] && [ "$service_name" != "kite-agent" ]; then
+  named=1
+  svc=$service_name
 fi
-target_agent="${bindir}/kite-agent"
-if [ -n "$service_name" ]; then
-  target_agent="/usr/local/lib/kite/${service_name}/kite-agent"
+pair_hint="kite-agent pair"
+upgrade_hint="sudo kite-agent upgrade"
+if [ "$named" -eq 1 ]; then
+  pair_hint="kite-agent pair --service-name ${svc}"
+  upgrade_hint="sudo kite-agent upgrade --service-name ${svc}"
 fi
-if [ -x "$target_agent" ]; then
-  # Use the installed binary so a downgrade is refused before the service
-  # is stopped. The copy in this archive may be older than that binary.
-  if ! run_as_root "$target_agent" upgrade --from "${tmp}/kite-agent" --version "$version" $extra; then
+
+# The client kite is the only binary this script writes onto PATH.
+# A named agent is installed by `kite-agent install --service-name`, which
+# copies itself to /usr/local/lib/kite/<name>/. Never write that binary to
+# ${bindir}/kite-agent, the default instance.
+if instance_exists "$svc"; then
+  runner="${tmp}/kite-agent"
+  if [ "$named" -eq 1 ] && [ -x "/usr/local/lib/kite/${svc}/kite-agent" ]; then
+    runner="/usr/local/lib/kite/${svc}/kite-agent"
+  elif [ "$named" -eq 0 ] && [ -x "${bindir}/kite-agent" ]; then
+    runner="${bindir}/kite-agent"
+  elif [ "$named" -eq 0 ] && [ -x /usr/local/bin/kite-agent ]; then
+    runner=/usr/local/bin/kite-agent
+  elif [ -x "${bindir}/kite-agent" ]; then
+    runner="${bindir}/kite-agent"
+  elif [ -x /usr/local/bin/kite-agent ]; then
+    runner=/usr/local/bin/kite-agent
+  fi
+  # shellcheck disable=SC2086
+  if ! run_as_root "$runner" upgrade --from "${tmp}/kite-agent" --version "$version" $extra; then
     echo "install.sh: kite-agent upgrade failed. The agent was not replaced." >&2
     exit 1
   fi
+  if [ -z "$code" ]; then
+    echo "Upgraded kite-agent ${svc} to ${version}. No install code was given, so the existing token was kept."
+    echo "Next, on this machine: ${pair_hint}"
+    echo "To update it later: ${upgrade_hint}"
+    exit 0
+  fi
 else
-  copy_bin "${tmp}/kite-agent" kite-agent
+  if [ -z "$relay" ] || [ -z "$code" ]; then
+    echo "install.sh: --agent requires --relay and --code when ${svc} is not installed yet" >&2
+    exit 1
+  fi
+  if [ "$named" -eq 0 ]; then
+    copy_bin "${tmp}/kite-agent" kite-agent
+    runner="${bindir}/kite-agent"
+  else
+    runner="${tmp}/kite-agent"
+  fi
 fi
 
 echo "Installed kite ${version} to ${bindir}"
+if [ "$named" -eq 1 ]; then
+  echo "  kite -> ${bindir}/kite"
+  echo "  service ${svc} -> /usr/local/lib/kite/${svc}/kite-agent"
+else
+  echo "  kite -> ${bindir}/kite"
+  echo "  kite-agent -> ${bindir}/kite-agent"
+fi
 case ":${PATH}:" in
   *":${bindir}:"*) ;;
   *)
@@ -360,9 +461,9 @@ case ":${PATH}:" in
 esac
 
 # shellcheck disable=SC2086
-if ! run_as_root "${bindir}/kite-agent" install --relay "$relay" --code "$code" $extra; then
+if ! run_as_root "$runner" install --relay "$relay" --code "$code" $extra; then
   echo "install.sh: kite-agent install failed." >&2
   exit 1
 fi
-echo "Next, on this machine: kite-agent pair"
-echo "If that cannot read the control file: sudo kite-agent pair"
+echo "Next, on this machine: ${pair_hint}"
+echo "If that cannot read the control file: sudo ${pair_hint}"
