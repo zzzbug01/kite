@@ -305,6 +305,112 @@ func TestInstallSHNamedExistingInstanceUpgradesWithoutCode(t *testing.T) {
 	}
 }
 
+func TestInstallSHNamedUpgradeIgnoresStaleDefaultBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is the Linux and macOS installer")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	sys := filepath.Join(dir, "sys")
+	if err := os.Mkdir(bin, 0o755); err != nil || os.Mkdir(sys, 0o755) != nil {
+		t.Fatal(err)
+	}
+	systemctl := "#!/bin/sh\nif [ \"$1\" = cat ] && [ \"$2\" = kite-agent-test3.service ]; then exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(sys, "systemctl"), []byte(systemctl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staleMark := filepath.Join(dir, "stale.txt")
+	stale := "#!/bin/sh\necho STALE >> \"$KITE_STALE_MARK\"\necho 'kite-agent: unexpected arguments' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "kite-agent"), []byte(stale), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argsFile := filepath.Join(dir, "args.txt")
+	srv := serveArchiveVersion(t, "v0.1.0-rc.9")
+	defer srv.Close()
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), "install.sh"),
+		"--version", "v0.1.0-rc.9", "--agent", "--service-name", "kite-agent-test3")
+	cmd.Env = append(os.Environ(),
+		"KITE_RELEASE_BASE="+srv.URL+"/dl",
+		"KITE_BIN_DIR="+bin,
+		"KITE_NO_SUDO=1",
+		"KITE_TEST_ARGS="+argsFile,
+		"KITE_STALE_MARK="+staleMark,
+		"PATH="+sys+":"+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("upgrade used the stale binary: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(staleMark); !os.IsNotExist(err) {
+		t.Fatal("stale /usr/local/bin kite-agent was executed")
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "upgrade") || !strings.Contains(string(args), "--service-name kite-agent-test3") {
+		t.Fatalf("downloaded binary args %q\n%s", args, out)
+	}
+}
+
+func TestInstallSHNamedDowngradePrintsTokenGuard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("install.sh is the Linux and macOS installer")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh is not installed")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	sys := filepath.Join(dir, "sys")
+	if err := os.Mkdir(bin, 0o755); err != nil || os.Mkdir(sys, 0o755) != nil {
+		t.Fatal(err)
+	}
+	systemctl := "#!/bin/sh\nif [ \"$1\" = cat ] && [ \"$2\" = kite-agent-test3.service ]; then exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(sys, "systemctl"), []byte(systemctl), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(dir, "agent.env")
+	if err := os.WriteFile(envFile, []byte("AGENT_TOKEN=kite_agent_file\nRELAY_ADDR=wss://relay.example/agent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := serveArchiveVersion(t, "v0.1.0-rc.3")
+	defer srv.Close()
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), "install.sh"),
+		"--version", "v0.1.0-rc.3", "--agent", "--service-name", "kite-agent-test3")
+	cmd.Env = append(os.Environ(),
+		"KITE_RELEASE_BASE="+srv.URL+"/dl",
+		"KITE_BIN_DIR="+bin,
+		"KITE_NO_SUDO=1",
+		"KITE_INSTANCE_ENV="+envFile,
+		"PATH="+sys+":"+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("downgrade was allowed:\n%s", out)
+	}
+	if !strings.Contains(string(out), "does not understand agent tokens") || !strings.Contains(string(out), "--force") {
+		t.Fatalf("output:\n%s", out)
+	}
+}
+
+func TestInstallPS1WindowsPairHint(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "install.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	if strings.Contains(text, "sudo kite-agent pair") {
+		t.Fatal("Windows installer still tells the user to use sudo")
+	}
+	if !strings.Contains(text, "elevated PowerShell") {
+		t.Fatal(text)
+	}
+}
+
 func TestInstallPS1NamedPlanDoesNotCopyDefaultAgent(t *testing.T) {
 	ps := powershell()
 	if ps == "" {
@@ -448,10 +554,15 @@ if ($picked -ne 'v0.1.0-rc.4') { throw "draft wrapper selected '$picked'" }
 
 func serveArchive(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
+	const version = "v0.1.0-rc.9"
+	return serveArchiveVersion(t, version), version
+}
+
+func serveArchiveVersion(t *testing.T, version string) *httptest.Server {
+	t.Helper()
 	archive := fakeArchive(t)
 	sum := sha256.Sum256(archive)
 	digest := hex.EncodeToString(sum[:])
-	const version = "v0.1.0-rc.9"
 	names := []string{"linux_amd64", "linux_arm64", "darwin_amd64", "darwin_arm64"}
 	var sums strings.Builder
 	for _, name := range names {
@@ -467,7 +578,7 @@ func serveArchive(t *testing.T) (*httptest.Server, string) {
 			http.NotFound(w, r)
 		}
 	}))
-	return srv, version
+	return srv
 }
 
 func fakeArchive(t *testing.T) []byte {

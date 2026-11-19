@@ -378,7 +378,7 @@ try {
         & $agentExe install --relay $Relay --code $Code --service-name $svc
         if ($LASTEXITCODE -ne 0) { throw "kite-agent install failed ($LASTEXITCODE)" }
         Write-Host "Next, on this machine: $pairHint"
-        Write-Host "If that cannot read the control file: sudo $pairHint"
+        Write-Host "If that cannot read the control file, from an elevated PowerShell: $pairHint"
       }
     } finally {
       Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue

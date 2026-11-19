@@ -356,6 +356,65 @@ note_agent_left_alone() {
   echo "To update it: sudo kite-agent upgrade"
 }
 
+# v0.1.0-rc.3 and earlier do not understand agent tokens. A release after
+# that tag, including v0.1.0 itself, does.
+version_predates_tokens() {
+  case "$1" in
+    v0.1.0-rc.[0-3]|v0.1.0-rc.[0-3].*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# refuse_token_downgrade prints the same error as kite-agent upgrade when the
+# target predates agent tokens and this instance has only an agent token.
+# It returns 1 when the upgrade must stop.
+refuse_token_downgrade() {
+  svc_name=$1
+  ver=$2
+  if ! version_predates_tokens "$ver"; then
+    return 0
+  fi
+  if [ "$svc_name" = "kite-agent" ]; then
+    envfile=/etc/kite/agent.env
+  else
+    envfile="/etc/kite/${svc_name}/agent.env"
+  fi
+  if [ -n "${KITE_INSTANCE_ENV:-}" ]; then
+    envfile=$KITE_INSTANCE_ENV
+  fi
+  if [ -r "$envfile" ]; then
+    content=$(cat "$envfile" 2>/dev/null || true)
+  else
+    content=$(run_as_root cat "$envfile" 2>/dev/null || true)
+  fi
+  token=""
+  key=""
+  oldifs=$IFS
+  IFS='
+'
+  for line in $content; do
+    case "$line" in
+      \#*|"") continue ;;
+    esac
+    keyname=${line%%[=:]*}
+    val=${line#*[=:]}
+    val=$(printf '%s' "$val" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//;s/^['\"]//;s/['\"]$//")
+    case "$keyname" in
+      AGENT_TOKEN|agent_token) token=$val ;;
+      REGISTRATION_KEY|registration_key) key=$val ;;
+    esac
+  done
+  IFS=$oldifs
+  if [ -z "$token" ]; then
+    return 0
+  fi
+  if [ -n "$key" ] && [ "$key" != "CHANGE_ME" ]; then
+    return 0
+  fi
+  echo "install.sh: ${ver} does not understand agent tokens (added after v0.1.0-rc.3). This install has only an agent token, so the downgrade would leave the agent unable to connect. Pass --force to kite-agent upgrade to do it anyway." >&2
+  return 1
+}
+
 run_as_root() {
   if [ "$(id -u)" -eq 0 ] || [ "${KITE_NO_SUDO:-}" = "1" ]; then
     "$@"
@@ -408,17 +467,21 @@ fi
 # copies itself to /usr/local/lib/kite/<name>/. Never write that binary to
 # ${bindir}/kite-agent, the default instance.
 if instance_exists "$svc"; then
-  runner="${tmp}/kite-agent"
-  if [ "$named" -eq 1 ] && [ -x "/usr/local/lib/kite/${svc}/kite-agent" ]; then
-    runner="/usr/local/lib/kite/${svc}/kite-agent"
-  elif [ "$named" -eq 0 ] && [ -x "${bindir}/kite-agent" ]; then
-    runner="${bindir}/kite-agent"
-  elif [ "$named" -eq 0 ] && [ -x /usr/local/bin/kite-agent ]; then
-    runner=/usr/local/bin/kite-agent
+  # A named instance's binary lives under /usr/local/lib/kite, which is mode
+  # 0700. Without root, -x on that path fails and an older kite-agent on PATH
+  # (/usr/local/bin, sometimes rc.1) would be asked to upgrade and reject the
+  # flags. Always drive a named upgrade with the binary just downloaded.
+  if [ "$named" -eq 1 ]; then
+    runner="${tmp}/kite-agent"
   elif [ -x "${bindir}/kite-agent" ]; then
     runner="${bindir}/kite-agent"
   elif [ -x /usr/local/bin/kite-agent ]; then
     runner=/usr/local/bin/kite-agent
+  else
+    runner="${tmp}/kite-agent"
+  fi
+  if ! refuse_token_downgrade "$svc" "$version"; then
+    exit 1
   fi
   # shellcheck disable=SC2086
   if ! run_as_root "$runner" upgrade --from "${tmp}/kite-agent" --version "$version" $extra; then

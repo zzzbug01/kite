@@ -66,11 +66,17 @@ func installFile(dest string, data []byte, windows bool) error {
 	return os.Chmod(dest, 0o755)
 }
 
-// CleanupOld removes the Windows dest.old file left by an earlier upgrade.
-// It is a no-op on other systems and when the file is still locked.
+// CleanupOld removes the previous executable left by an upgrade.
+// Windows renames the running exe to dest.old. The service swap renames it
+// to dest.prev and removes that after a successful swap; a start still
+// deletes a leftover so the instance folder keeps one binary.
 func CleanupOld(exe string) {
-	if runtime.GOOS != "windows" || strings.TrimSpace(exe) == "" {
+	exe = strings.TrimSpace(exe)
+	if exe == "" {
 		return
 	}
-	_ = os.Remove(exe + ".old")
+	_ = os.Remove(exe + ".prev")
+	if runtime.GOOS == "windows" {
+		_ = os.Remove(exe + ".old")
+	}
 }

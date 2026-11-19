@@ -184,6 +184,27 @@ func TestOlderAndSame(t *testing.T) {
 	}
 }
 
+func TestCleanupOldRemovesPrev(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "kite-agent.exe")
+	if err := os.WriteFile(exe, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe+".prev", []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe+".old", []byte("older"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	CleanupOld(exe)
+	if _, err := os.Stat(exe + ".prev"); !os.IsNotExist(err) {
+		t.Fatalf("prev left behind: %v", err)
+	}
+	if _, err := os.Stat(exe); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInstallFileRenamesAside(t *testing.T) {
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "kite")
